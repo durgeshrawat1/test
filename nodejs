@@ -1,0 +1,207 @@
+Okay, let's see. The user wants to create a RAG system using AWS Bedrock and store data in DocumentDB with a vector store. They have two XLSX files converted into JSONL, 144 rows each. The main steps are generating embeddings and storing them in DocumentDB with metadata for retrieval.
+
+First, I need to outline the process. They already have a DocumentDB cluster set up with a VPC, so no need to create that. Next, they need to process the JSONL data, generate embeddings using Bedrock, and store both the embeddings and metadata in DocumentDB.
+
+Generating embeddings: Bedrock's Titan Embeddings model can be used. So, the user will need to read each JSONL line, extract the text (probably combining columns into a single text), generate the embedding vector, then store the vector along with metadata like original columns and any other relevant info.
+
+For DocumentDB, since it's compatible with MongoDB, they'll create a database and collection. Each document should include the embedding vector, raw text, and metadata fields. Indexing the embedding field using the knnVector type is crucial for efficient similarity searches. The user needs to create a vector index with the right dimensions (Titan Embeddings output size is 1536).
+
+The code steps: process JSONL, generate embeddings, structure documents, insert into DocumentDB. Also, setting up the vector index in DocumentDB using createIndex with the knnVector specification.
+
+They might need to install dependencies like pymongo, boto3, and jsonlines. Security-wise, using IAM roles or credentials for Bedrock and DocumentDB access. Also, ensure the EC2 or Lambda running the script has VPC access to DocumentDB.
+
+Testing the insertion and retrieval. Maybe a sample query using aggregation with $search and vectorEmbedding. Monitoring performance, maybe adjusting the index parameters like efConstruction and m for HNSW.
+
+Potential issues: Correct embedding dimensions, proper index creation, handling connection to DocumentDB within the VPC, data formatting in JSONL. Also, error handling in the script for API limits or connection issues.
+
+So, putting this all together, provide code snippets for processing, embedding, inserting, and creating the index. Explain each part and mention best practices like batching, error handling, and index tuning.
+
+I'll guide you through creating a RAG system with AWS Bedrock and DocumentDB (with MongoDB compatibility). Here's a step-by-step approach:
+
+1. DocumentDB Collection Structure:
+Create a collection with documents containing both metadata and vectors. Example structure:
+
+javascript
+{
+  "metadata": {
+    "source_file": "file1.xlsx",
+    "row_id": 42,
+    "original_columns": {
+      "column1": "value1",
+      "column2": "value2"
+    }
+  },
+  "raw_text": "combined text from all columns",
+  "vector": [0.12, 0.24, ..., 0.98] // Titan Embeddings vector
+}
+2. Create DocumentDB Index:
+First create a vector index for efficient similarity search:
+
+javascript
+db.createCollection("rag_embeddings");
+
+db.rag_embeddings.createIndex({
+  "vector": "knnVector"
+}, {
+  "name": "rag_vector_index",
+  "knnVector": {
+    "dimensions": 1536,  // Titan Embeddings dimension
+    "similarity": "cosine",
+    "efConstruction": 512,
+    "m": 16
+  }
+});
+3. Python Implementation:
+
+First install dependencies:
+
+bash
+pip install pymongo boto3 jsonlines
+Here's the processing script:
+
+python
+import json
+import jsonlines
+import boto3
+from pymongo import MongoClient
+
+# Configuration
+BEDROCK_REGION = 'us-east-1'
+DOCUMENTDB_URI = 'mongodb://user:pass@cluster-endpoint:27017'
+DATABASE_NAME = 'rag_db'
+COLLECTION_NAME = 'rag_embeddings'
+
+# Initialize clients
+bedrock = boto3.client('bedrock-runtime', region_name=BEDROCK_REGION)
+documentdb = MongoClient(DOCUMENTDB_URI)
+db = documentdb[DATABASE_NAME]
+collection = db[COLLECTION_NAME]
+
+def generate_embedding(text):
+    response = bedrock.invoke_model(
+        body=json.dumps({"inputText": text}),
+        modelId='amazon.titan-embed-text-v1',
+        accept='application/json',
+        contentType='application/json'
+    )
+    return json.loads(response['body'].read())['embedding']
+
+def process_jsonl(file_path):
+    with jsonlines.open(file_path) as reader:
+        for row in reader:
+            # Combine columns into raw text
+            raw_text = " ".join([str(v) for v in row.values() if v != "metadata"])
+            
+            # Generate embedding
+            embedding = generate_embedding(raw_text)
+            
+            # Create document
+            doc = {
+                "metadata": row.get("metadata", {}),
+                "raw_text": raw_text,
+                "vector": embedding
+            }
+            
+            # Insert into DocumentDB
+            collection.insert_one(doc)
+
+# Process your files
+process_jsonl('your_file1.jsonl')
+process_jsonl('your_file2.jsonl')
+
+print("Embeddings generated and stored successfully!")
+4. Querying for RAG:
+When querying, generate embedding for the query and search using:
+
+python
+def rag_search(query_text, top_k=3):
+    query_embedding = generate_embedding(query_text)
+    
+    results = collection.aggregate([
+        {
+            "$search": {
+                "knnBeta": {
+                    "vector": query_embedding,
+                    "path": "vector",
+                    "k": top_k
+                }
+            }
+        },
+        {
+            "$project": {
+                "raw_text": 1,
+                "metadata": 1,
+                "score": { "$meta": "searchScore" }
+            }
+        }
+    ])
+    
+    return list(results)
+Key Considerations:
+
+Data Preparation:
+
+Ensure your JSONL has both raw data and metadata in separate fields
+
+Handle special characters/text cleaning before embedding
+
+Performance:
+
+Use batch processing for large datasets
+
+Add error handling and retries for Bedrock API calls
+
+Consider adding index on metadata fields you'll frequently filter on
+
+Security:
+
+Use IAM roles for Bedrock access
+
+Encrypt sensitive metadata fields
+
+Use DocumentDB TLS connections
+
+Optimization:
+
+Adjust KNN index parameters (efConstruction, m) based on your scale
+
+Monitor query performance with DocumentDB metrics
+
+Consider compressing vectors if storage becomes an issue
+
+To create the DocumentDB resources if not existing:
+
+javascript
+// Create database
+use rag_db
+
+// Create collection with validator (optional)
+db.createCollection("rag_embeddings", {
+  validator: {
+    $jsonSchema: {
+      bsonType: "object",
+      required: ["vector", "raw_text", "metadata"],
+      properties: {
+        vector: {
+          bsonType: "array",
+          items: {
+            bsonType: "double"
+          }
+        },
+        raw_text: { bsonType: "string" },
+        metadata: { bsonType: "object" }
+      }
+    }
+  }
+})
+Remember to:
+
+Enable the MongoDB-compatible layer in DocumentDB
+
+Configure proper VPC security groups for your application
+
+Set up proper backup and retention policies
+
+Monitor Bedrock service quotas to avoid throttling
+
+Would you like me to elaborate on any specific part of this implementation?
