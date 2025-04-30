@@ -1,0 +1,440 @@
+import json
+import boto3
+import os
+import logging
+import getpass # For securely getting password
+from pymongo import MongoClient
+from pymongo.errors import ConnectionFailure, OperationFailure, CollectionInvalid
+from botocore.exceptions import ClientError
+from datetime import datetime
+
+# --- Configuration ---
+# AWS Bedrock Configuration
+BEDROCK_REGION = "us-east-1"  # Replace with your Bedrock region
+EMBEDDING_MODEL_ID = "amazon.titan-embed-text-v1"
+EMBEDDING_DIMENSIONS = 1536 # Dimension for Titan Text Embeddings v1
+
+# Amazon DocumentDB Configuration
+# **Best Practice: Use environment variables or AWS Secrets Manager**
+# Example using environment variables:
+# DOCDB_URI = os.environ.get("DOCDB_URI", "mongodb://<user>:<password>@<your_docdb_endpoint>:<port>/?tls=true&tlsCAFile=global-bundle.pem&replicaSet=rs0&readPreference=secondaryPreferred&retryWrites=false")
+DOCDB_USER = os.environ.get("DOCDB_USER")
+DOCDB_PASS = os.environ.get("DOCDB_PASS") # Or prompt below
+DOCDB_ENDPOINT = os.environ.get("DOCDB_ENDPOINT", "<your_docdb_cluster_endpoint.region.docdb.amazonaws.com:port>") # Replace with your endpoint:port
+DOCDB_NAME = "DataQualityDB"
+DOCDB_COLLECTION_NAME = "AttributeEmbeddings"
+# Download global-bundle.pem if needed: wget https://truststore.pki.us-east-1.rds.amazonaws.com/global/global-bundle.pem
+DOCDB_TLS_CA_FILE = os.environ.get("DOCDB_TLS_CA_FILE", "global-bundle.pem")
+
+# Vector Index Configuration
+VECTOR_INDEX_NAME = "idx_vector_hnsw"
+EMBEDDING_FIELD = "embedding_vector" # Field name in the document storing the vector
+TEXT_CHUNK_FIELD = "text_chunk" # Field name for the text
+ATTRIBUTE_NAME_FIELD = "attribute_name" # Field name for the attribute identifier
+METADATA_FIELD = "metadata" # Field name for the metadata object
+INDEX_METRIC = "cosine" # Or "euclidean", "dotProduct"
+# HNSW parameters (tune based on performance/recall needs)
+HNSW_M = 16           # Number of bi-directional links created for every new element
+HNSW_EF_CONSTRUCTION = 64 # Size of the dynamic list for the nearest neighbors used during indexing
+
+# Input Data Files
+FILE1_PATH = "file1.jsonl"
+FILE2_PATH = "file2.jsonl"
+
+# Setup logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# --- Helper Functions ---
+
+def load_jsonl(filepath):
+    """Loads data from a JSON Lines file."""
+    data = []
+    if not os.path.exists(filepath):
+        logging.error(f"File not found: {filepath}")
+        return None
+    try:
+        with open(filepath, 'r', encoding='utf-8') as f:
+            for line_num, line in enumerate(f, 1):
+                try:
+                    line = line.strip()
+                    if line:
+                        data.append(json.loads(line))
+                except json.JSONDecodeError as e:
+                    logging.warning(f"Skipping invalid JSON line {line_num} in {filepath}: {line} - Error: {e}")
+    except IOError as e:
+        logging.error(f"Error reading file {filepath}: {e}")
+        return None
+    return data
+
+def consolidate_attribute_data(data1, data2):
+    """Consolidates data, adding placeholders for domain/criticality if missing."""
+    consolidated = {}
+    # Process File 1 data
+    if data1:
+        for item in data1:
+            attr_name = item.get("attributename") or item.get("dq_attributename") or item.get("logicalattributename")
+            if not attr_name:
+                logging.warning(f"Skipping item in file 1 due to missing attribute name: {item}")
+                continue
+            attr_key = attr_name.lower()
+            consolidated[attr_key] = {
+                "attribute_name_original": attr_name,
+                "description": item.get("description", ""),
+                "needed": item.get("needed", ""),
+                "logical_description": item.get("logicaldescription", ""),
+                "dq_description": item.get("dq_description", ""),
+                "need_confidence_score": item.get("need_confidencne_score"), # Keep original typo
+                "data_type": item.get("data_type"), # Assuming data_type might be here
+                # --- Crucial for Mortgage Use Case ---
+                "domain": item.get("domain", "General"), # Default if missing
+                "criticality": item.get("criticality", "Unknown"), # Default if missing
+                # ---
+                "source_files": [FILE1_PATH],
+                "dq_rules": []
+            }
+    # Process File 2 data and merge
+    if data2:
+        for item in data2:
+            attr_name = item.get("attribute_name")
+            if not attr_name:
+                logging.warning(f"Skipping item in file 2 due to missing attribute name: {item}")
+                continue
+            attr_key = attr_name.lower()
+            rule = item.get("data_quality_rule", "")
+            if attr_key in consolidated:
+                if rule:
+                    consolidated[attr_key]["dq_rules"].append(rule)
+                if FILE2_PATH not in consolidated[attr_key]["source_files"]:
+                     consolidated[attr_key]["source_files"].append(FILE2_PATH)
+            else:
+                logging.warning(f"Attribute '{attr_name}' found in File 2 but not File 1. Adding with limited info.")
+                consolidated[attr_key] = {
+                     "attribute_name_original": attr_name, "description": "", "needed": "",
+                     "logical_description": "", "dq_description": "", "need_confidence_score": None,
+                     "data_type": None, "domain": "General", "criticality": "Unknown",
+                     "source_files": [FILE2_PATH],
+                     "dq_rules": [rule] if rule else []
+                }
+    return consolidated
+
+def create_text_chunks_for_embedding(consolidated_data):
+    """Creates descriptive text chunks including domain/criticality."""
+    text_chunks = {}
+    for attr_key, data in consolidated_data.items():
+        attr_name_display = data.get("attribute_name_original", attr_key)
+        chunk = f"Attribute Name: {attr_name_display}\n"
+        # --- Add domain/criticality early for semantic importance ---
+        chunk += f"Domain: {data.get('domain', 'N/A')}\n"
+        chunk += f"Criticality: {data.get('criticality', 'N/A')}\n"
+        # ---
+        desc = data.get('description') or data.get('dq_description')
+        if desc: chunk += f"Description: {desc}\n"
+        if data.get('logical_description'): chunk += f"Logical Context: {data.get('logical_description')}\n"
+        if data.get('data_type'): chunk += f"Data Type: {data.get('data_type')}\n"
+        if data.get('needed'): chunk += f"Needed: {data.get('needed')}\n"
+        if data.get('need_confidence_score'): chunk += f"Required Confidence Score: {data.get('need_confidence_score')}\n"
+        if data.get('dq_rules'):
+            chunk += "Data Quality Rules:\n"
+            for rule in data['dq_rules']: chunk += f"- {rule}\n"
+        text_chunks[attr_name_display] = {"text": chunk.strip(), "consolidated": data}
+    return text_chunks
+
+def get_bedrock_embedding(text_chunk, bedrock_client):
+    """Generates embedding for a single text chunk using AWS Bedrock."""
+    try:
+        body = json.dumps({"inputText": text_chunk})
+        response = bedrock_client.invoke_model(
+            body=body, modelId=EMBEDDING_MODEL_ID,
+            accept="application/json", contentType="application/json",
+        )
+        response_body = json.loads(response["body"].read())
+        embedding = response_body.get("embedding")
+        if not embedding:
+             logging.error(f"Could not extract embedding from response for chunk: {text_chunk[:100]}...")
+             return None
+        return embedding
+    except ClientError as e:
+        logging.error(f"Bedrock API error: {e}")
+        return None
+    except Exception as e:
+        logging.error(f"Error generating embedding for chunk: {text_chunk[:100]}... Error: {e}")
+        return None
+
+def get_docdb_connection(user, password, endpoint, tls_ca_file, db_name):
+    """Establishes connection to DocumentDB."""
+    if not user:
+        user = input("Enter DocumentDB Username: ")
+    if not password:
+        password = getpass.getpass("Enter DocumentDB Password: ")
+
+    if not all([user, password, endpoint, tls_ca_file, db_name]):
+        logging.error("Missing DocumentDB connection details.")
+        return None, None
+
+    connection_string = f"mongodb://{user}:{password}@{endpoint}/?tls=true&tlsCAFile={tls_ca_file}&replicaSet=rs0&readPreference=secondaryPreferred&retryWrites=false"
+
+    try:
+        logging.info(f"Connecting to DocumentDB: {endpoint.split('@')[-1]}...") # Log endpoint without creds
+        client = MongoClient(connection_string)
+        # The ismaster command is cheap and does not require auth.
+        client.admin.command('ismaster')
+        logging.info("DocumentDB connection successful.")
+        db = client[db_name]
+        return client, db
+    except ConnectionFailure as e:
+        logging.error(f"DocumentDB connection failed: {e}")
+        return None, None
+    except Exception as e:
+        logging.error(f"An error occurred during DocumentDB connection: {e}")
+        return None, None
+
+def create_vector_index(collection, index_name, embedding_key, dimensions, metric, m, ef_construction):
+    """Creates an HNSW vector index in the specified DocumentDB collection."""
+    try:
+        # Check if index already exists
+        existing_indexes = [index['name'] for index in collection.list_indexes()]
+        if index_name in existing_indexes:
+            logging.info(f"Vector index '{index_name}' already exists.")
+            return True
+
+        logging.info(f"Creating vector index '{index_name}'...")
+        collection.create_index(
+            [(embedding_key, "vector")], # Specify the field and type "vector"
+            name=index_name,
+            vectorOptions={                 # Use 'vectorOptions' subdocument
+                "type": "HNSW",
+                "dimensions": dimensions,
+                "similarity": metric,       # e.g., "cosine", "euclidean", "dotProduct"
+                "m": m,
+                "efConstruction": ef_construction
+            }
+        )
+        logging.info(f"Vector index '{index_name}' created successfully.")
+        return True
+    except OperationFailure as e:
+        # Handle potential errors like invalid options or index already exists with different options
+        logging.error(f"Failed to create vector index '{index_name}': {e.details}")
+        # Check if the error indicates it already exists (code 85 for IndexOptionsConflict, 86 for IndexKeySpecsConflict)
+        if e.code in [85, 86]:
+             logging.warning(f"Index '{index_name}' might already exist with different options. Please verify.")
+             return True # Treat as success if it exists, but warn user
+        return False
+    except Exception as e:
+        logging.error(f"An unexpected error occurred during index creation: {e}")
+        return False
+
+def insert_data_to_docdb(collection, data_map, attr_name_field, text_chunk_field, embedding_field, metadata_field):
+    """Inserts or updates data (including embeddings) into DocumentDB."""
+    logging.info(f"Inserting/updating {len(data_map)} documents into collection '{collection.name}'...")
+    inserted_count = 0
+    updated_count = 0
+    failed_count = 0
+
+    for attribute_name, data in data_map.items():
+        if data.get("embedding_vector") is None:
+            logging.warning(f"Skipping insertion for '{attribute_name}' due to missing embedding.")
+            failed_count += 1
+            continue
+
+        # Prepare the metadata subdocument
+        metadata_doc = {
+            "domain": data["consolidated"].get("domain", "General"),
+            "criticality": data["consolidated"].get("criticality", "Unknown"),
+            "source_files": data["consolidated"].get("source_files", []),
+            "data_type": data["consolidated"].get("data_type"),
+            "description": data["consolidated"].get("description"),
+            "logical_description": data["consolidated"].get("logical_description"),
+            "dq_rules_list": data["consolidated"].get("dq_rules", []),
+            "confidence_score_required": data["consolidated"].get("need_confidence_score"),
+            "last_updated": datetime.utcnow() # Add timestamp
+        }
+        # Filter out None values from metadata if desired
+        metadata_doc = {k: v for k, v in metadata_doc.items() if v is not None}
+
+
+        doc_to_insert = {
+            attr_name_field: attribute_name,
+            text_chunk_field: data["text"],
+            embedding_field: data["embedding_vector"],
+            metadata_field: metadata_doc
+        }
+
+        try:
+            # Use update_one with upsert=True to insert if not exist, update if exists based on attribute_name
+            result = collection.update_one(
+                {attr_name_field: attribute_name},
+                {"$set": doc_to_insert},
+                upsert=True
+            )
+            if result.upserted_id:
+                inserted_count += 1
+            elif result.matched_count:
+                updated_count += 1
+        except OperationFailure as e:
+            logging.error(f"Failed to insert/update document for '{attribute_name}': {e.details}")
+            failed_count += 1
+        except Exception as e:
+             logging.error(f"An unexpected error occurred during insertion for '{attribute_name}': {e}")
+             failed_count += 1
+
+
+    logging.info(f"Insertion complete. Inserted: {inserted_count}, Updated: {updated_count}, Failed: {failed_count}")
+    return failed_count == 0
+
+def perform_vector_search(collection, query_vector, k, index_name, embedding_path):
+    """Performs a vector search using the $vectorSearch aggregation stage."""
+    if query_vector is None:
+        logging.error("Cannot perform search with a null query vector.")
+        return []
+
+    pipeline = [
+        {
+            "$search": {
+                "vectorSearch": {
+                    "vector": query_vector,
+                    "path": embedding_path,  # Field containing the vectors
+                    "k": k,                 # Number of nearest neighbors to return
+                    "index": index_name     # The name of the vector index
+                    # Optional: "similarity": "cosine" # Can be specified if different from index default
+                }
+            }
+        },
+        { # Optional: Project only the fields you need
+          "$project": {
+              "_id": 0, # Exclude the default ID
+              ATTRIBUTE_NAME_FIELD: 1,
+              METADATA_FIELD: 1,
+              TEXT_CHUNK_FIELD: 1, # Include text chunk for context
+              "searchScore": { "$meta": "searchScore" } # Include the similarity score
+          }
+        }
+    ]
+
+    try:
+        logging.info(f"Performing vector search with k={k} using index '{index_name}'...")
+        results = list(collection.aggregate(pipeline))
+        logging.info(f"Found {len(results)} similar documents.")
+        return results
+    except OperationFailure as e:
+        logging.error(f"Vector search failed: {e.details}")
+        return []
+    except Exception as e:
+         logging.error(f"An unexpected error occurred during vector search: {e}")
+         return []
+
+# --- Main Execution ---
+if __name__ == "__main__":
+    logging.info("Starting RAG pipeline: Embeddings to DocumentDB...")
+
+    # 1. Initialize Bedrock Client
+    try:
+        bedrock_runtime = boto3.client('bedrock-runtime', region_name=BEDROCK_REGION)
+        logging.info(f"Successfully initialized Bedrock client in region {BEDROCK_REGION}")
+    except Exception as e:
+        logging.error(f"Failed to initialize Bedrock client: {e}")
+        exit(1)
+
+    # 2. Load and Prepare Data
+    logging.info(f"Loading data from {FILE1_PATH} and {FILE2_PATH}...")
+    file1_data = load_jsonl(FILE1_PATH)
+    file2_data = load_jsonl(FILE2_PATH)
+    if file1_data is None or file2_data is None:
+        logging.error("Failed to load data. Exiting.")
+        exit(1)
+
+    logging.info("Consolidating attribute data...")
+    consolidated_attributes = consolidate_attribute_data(file1_data, file2_data)
+    if not consolidated_attributes:
+         logging.error("No data consolidated. Exiting.")
+         exit(1)
+
+    logging.info(f"Creating text chunks for {len(consolidated_attributes)} attributes...")
+    # text_chunks_map format: { "attribute_name": {"text": "...", "consolidated": {...}} }
+    text_chunks_map = create_text_chunks_for_embedding(consolidated_attributes)
+
+    # 3. Generate Embeddings
+    logging.info(f"Generating embeddings using Bedrock model: {EMBEDDING_MODEL_ID}...")
+    # Add embeddings to the map: { "attribute_name": {"text": "...", "consolidated": {...}, "embedding_vector": [...] } }
+    embeddings_generated_count = 0
+    failed_embedding_count = 0
+    for attr_name, data in text_chunks_map.items():
+        embedding = get_bedrock_embedding(data["text"], bedrock_runtime)
+        if embedding:
+            data["embedding_vector"] = embedding
+            embeddings_generated_count += 1
+        else:
+            data["embedding_vector"] = None # Mark as failed
+            failed_embedding_count += 1
+            logging.warning(f"Failed to generate embedding for: {attr_name}")
+
+    logging.info(f"Finished generating embeddings. Success: {embeddings_generated_count}, Failed: {failed_embedding_count}")
+    if embeddings_generated_count == 0:
+        logging.error("No embeddings were generated successfully. Cannot proceed.")
+        exit(1)
+
+
+    # 4. Connect to DocumentDB
+    docdb_client, docdb_db = get_docdb_connection(DOCDB_USER, DOCDB_PASS, DOCDB_ENDPOINT, DOCDB_TLS_CA_FILE, DOCDB_NAME)
+    if not docdb_client or not docdb_db:
+        logging.error("Could not connect to DocumentDB. Exiting.")
+        exit(1)
+
+    try:
+        # Get collection
+        collection = docdb_db[DOCDB_COLLECTION_NAME]
+        logging.info(f"Using DocumentDB collection: '{DOCDB_COLLECTION_NAME}'")
+
+        # 5. Create Vector Index (if it doesn't exist)
+        index_created = create_vector_index(
+            collection, VECTOR_INDEX_NAME, EMBEDDING_FIELD,
+            EMBEDDING_DIMENSIONS, INDEX_METRIC, HNSW_M, HNSW_EF_CONSTRUCTION
+        )
+        if not index_created:
+            # Decide if you want to proceed without index or exit
+            logging.warning("Could not ensure vector index exists. Search performance will be poor or fail.")
+            # exit(1) # Optional: exit if index creation fails critically
+
+        # 6. Insert/Update Data into DocumentDB
+        insert_success = insert_data_to_docdb(
+            collection, text_chunks_map, ATTRIBUTE_NAME_FIELD,
+            TEXT_CHUNK_FIELD, EMBEDDING_FIELD, METADATA_FIELD
+        )
+        if not insert_success:
+             logging.warning("Some documents failed to insert/update.")
+
+
+        # 7. Demonstrate Vector Search (Example)
+        logging.info("\n--- Demonstrating Vector Search ---")
+        # Find an attribute that has a vector to use for querying
+        query_attribute_name = None
+        query_vector = None
+        for name, data in text_chunks_map.items():
+            if data.get("embedding_vector"):
+                query_attribute_name = name
+                query_vector = data["embedding_vector"]
+                break
+
+        if query_attribute_name and query_vector:
+            logging.info(f"Searching for attributes similar to: '{query_attribute_name}'")
+            search_results = perform_vector_search(collection, query_vector, k=5, index_name=VECTOR_INDEX_NAME, embedding_path=EMBEDDING_FIELD)
+
+            if search_results:
+                print(f"\nTop {len(search_results)} similar attributes found:")
+                for i, result in enumerate(search_results):
+                    print(f"{i+1}. Attribute: {result.get(ATTRIBUTE_NAME_FIELD, 'N/A')}")
+                    print(f"   Score: {result.get('searchScore', 'N/A'):.4f}")
+                    print(f"   Domain: {result.get(METADATA_FIELD, {}).get('domain', 'N/A')}")
+                    print(f"   Criticality: {result.get(METADATA_FIELD, {}).get('criticality', 'N/A')}")
+                    # print(f"   Text Chunk Snippet: {result.get(TEXT_CHUNK_FIELD, '')[:100]}...") # Optionally print snippet
+            else:
+                print("No similar attributes found.")
+        else:
+             logging.warning("Could not find a valid embedding vector to use for the example search.")
+
+    finally:
+        # Close DocumentDB connection
+        if docdb_client:
+            docdb_client.close()
+            logging.info("DocumentDB connection closed.")
+
+    logging.info("RAG pipeline script finished.")
