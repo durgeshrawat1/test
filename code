@@ -1,0 +1,89 @@
+import boto3
+import pandas as pd
+from pymongo import MongoClient
+from typing import List, Dict
+
+# Initialize clients
+bedrock = boto3.client(service_name='bedrock-runtime', region_name='us-east-1')
+documentdb_client = MongoClient('<YOUR_DOCUMENTDB_CONNECTION_STRING>')
+db = documentdb_client['your_database_name']
+collection = db['embeddings_collection']
+
+def load_and_merge_data(file1_path: str, file2_path: str) -> List[Dict]:
+    """Load and merge files based on Attribute/ElementName relationship"""
+    df1 = pd.read_csv(file1_path)
+    df2 = pd.read_csv(file2_path)
+    
+    # Merge datasets
+    merged_df = pd.merge(
+        df1,
+        df2,
+        left_on='Attribute',
+        right_on='ElementName',
+        how='inner'
+    )
+    
+    return merged_df.to_dict('records')
+
+def generate_embedding(text: str) -> List[float]:
+    """Generate embeddings using AWS Bedrock Titan model"""
+    response = bedrock.invoke_model(
+        body=json.dumps({"inputText": text}),
+        modelId='amazon.titan-embed-text-v1',
+        accept='application/json',
+        contentType='application/json'
+    )
+    return json.loads(response['body'].read())['embedding']
+
+def process_records(records: List[Dict]):
+    """Process records and store embeddings in DocumentDB"""
+    for record in records:
+        try:
+            # Create combined text for embedding
+            combined_text = (
+                f"Attribute: {record.get('Attribute', '')} "
+                f"Description: {record.get('Attribute_description', '')} "
+                f"Rule Info: {record.get('Rule_Description', '')} "
+                f"Element Details: {record.get('description_of_elementname', '')} "
+                f"Comments: {record.get('Comment', '')} "
+                f"Sensitivity: {record.get('Sensitvity', '')}"
+            )
+            
+            # Generate embedding
+            embedding = generate_embedding(combined_text)
+            
+            # Prepare metadata
+            metadata = {
+                'attribute': record.get('Attribute'),
+                'element_name': record.get('ElementName'),
+                'rule_name': record.get('Rule_Name'),
+                'rule_dimension': record.get('Rule_Dimension'),
+                'sensitivity': record.get('Sensitvity'),
+                'confidence_score': record.get('Cofidence_score'),
+                'critical_data_indicator': record.get('Indicator_of_critical_data_element')
+            }
+            
+            # Create document for DocumentDB
+            document = {
+                'raw_text': combined_text,
+                'embedding': embedding,
+                'metadata': metadata,
+                'source': {'file1': True, 'file2': True}
+            }
+            
+            # Insert into DocumentDB
+            collection.insert_one(document)
+            
+        except Exception as e:
+            print(f"Error processing record {record.get('Attribute')}: {str(e)}")
+            continue
+
+if __name__ == "__main__":
+    # Load data
+    records = load_and_merge_data('file1.csv', 'file2.csv')
+    
+    # Process and store embeddings
+    process_records(records)
+    
+    print(f"Successfully processed {len(records)} embeddings")
+    documentdb_client.close()
