@@ -1,0 +1,291 @@
+Here's a complete, optimized solution using Anthropic's Claude 3 and Cohere models with proper handling of optional priority fields:
+
+1. Configuration & Initialization
+python
+import os
+import json
+from pymongo import MongoClient
+import boto3
+from tenacity import retry, stop_after_attempt, wait_exponential
+
+# Configuration
+DOCDB_URI = os.getenv("DOCDB_URI", "mongodb://user:pass@your-cluster-endpoint:27017")
+BEDROCK_REGION = os.getenv("BEDROCK_REGION", "us-east-1")
+EMBED_MODEL = "cohere.embed-english-v3"
+LLM_MODEL = "anthropic.claude-3-sonnet-20240229-v1:0"
+
+# Initialize clients
+bedrock = boto3.client("bedrock-runtime", region_name=BEDROCK_REGION)
+docdb = MongoClient(DOCDB_URI)
+collection = docdb.underwriting_data.dq_rules
+2. Enhanced Data Processing with Optional Priority
+python
+def process_records(file1_path: str, file2_path: str):
+    """Process files with optional priority handling"""
+    file1_data = load_jsonl(file1_path)
+    file2_data = load_jsonl(file2_path)
+    
+    # Create element mapping with case-insensitive matching
+    element_map = {item["Elementname"].lower(): item for item in file2_data}
+    
+    for rule in file1_data:
+        try:
+            element_key = rule["Attribute"].lower()
+            element_data = element_map.get(element_key, {})
+            
+            # Build metadata with optional priority
+            metadata = {
+                "attribute": rule["Attribute"],
+                "rule_name": rule["Rule_Name"],
+                "critical": element_data.get("Indicator_of_critical_data_element", "N"),
+                "confidence": float(element_data.get("Confidence_score", "0%").strip("%")) / 100,
+                "modules": parse_modules(element_data.get("Ref_Column_for_ABC_DEF_modules", "")),
+                "priority": int(rule["Rule_Priority"]) if "Rule_Priority" in rule else None
+            }
+            
+            # Create combined content
+            content = format_content(rule, element_data)
+            
+            # Generate and store embedding
+            doc = {
+                "metadata": clean_metadata(metadata),
+                "content": content,
+                "vector": generate_cohere_embedding(content["combined_text"])
+            }
+            
+            collection.insert_one(doc)
+            
+        except Exception as e:
+            print(f"Error processing {rule.get('Attribute', 'unknown')}: {str(e)}")
+            continue
+
+def format_content(rule: dict, element_data: dict) -> dict:
+    """Structure content for RAG context"""
+    return {
+        "combined_text": f"""
+        Attribute: {rule['Attribute']}
+        Description: {rule['Attribute_description']}
+        Rule: {rule['Rule_Description']}
+        Criticality: {element_data.get('Indicator_of_critical_data_element', 'N/A')}
+        Modules: {element_data.get('Ref_Column_for_ABC_DEF_modules', 'N/A')}
+        Logical Relationships: {element_data.get('Logical_description_of_element', '')}
+        """.strip(),
+        "descriptions": {
+            "attribute": rule["Attribute_description"],
+            "rule": rule["Rule_Description"],
+            "logical": element_data.get("Logical_description_of_element", "")
+        }
+    }
+
+def clean_metadata(metadata: dict) -> dict:
+    """Remove None values and empty lists"""
+    return {k: v for k, v in metadata.items() if v not in [None, "", []]}
+3. Cohere Embedding Generation
+python
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
+def generate_cohere_embedding(text: str) -> list:
+    """Generate embeddings using Cohere model"""
+    response = bedrock.invoke_model(
+        body=json.dumps({"texts": [text], "input_type": "search_document"}),
+        modelId=EMBED_MODEL,
+        accept="application/json",
+        contentType="application/json"
+    )
+    return json.loads(response["body"].read())["embeddings"][0]
+4. DocumentDB Vector Index Setup
+python
+def create_vector_index():
+    """Create optimized vector index for Cohere embeddings"""
+    collection.drop_index("cohere_vector_index") if "cohere_vector_index" in collection.index_information() else None
+    
+    collection.create_index(
+        [("vector", "vector")],
+        name="cohere_vector_index",
+        vectorOptions={
+            "dimensions": 1024,  # Cohere embedding dimensions
+            "similarity": "cosine",
+            "m": 16,
+            "efConstruction": 512
+        }
+    )
+    
+    # Create supporting indexes
+    collection.create_index([("metadata.critical", 1)])
+    collection.create_index([("metadata.modules", 1)])
+5. RAG Implementation with Claude 3
+python
+def generate_dq_rules(query: str, top_k: int = 5) -> dict:
+    """Generate data quality rules using Claude 3"""
+    query_embedding = generate_cohere_embedding(query)
+    
+    # Vector search pipeline
+    results = collection.aggregate([
+        {"$vectorSearch": {
+            "index": "cohere_vector_index",
+            "path": "vector",
+            "queryVector": query_embedding,
+            "numCandidates": 100,
+            "limit": top_k
+        }},
+        {"$project": {
+            "content": 1,
+            "metadata": 1,
+            "score": {"$meta": "vectorSearchScore"}
+        }}
+    ])
+    
+    # Prepare context with confidence scoring
+    context = []
+    for doc in results:
+        context.append(f"""
+        [Confidence: {doc['metadata']['confidence']:.0%}]
+        {doc['content']['combined_text']}
+        """)
+    
+    # Generate response
+    messages = [{
+        "role": "user",
+        "content": f"""Create comprehensive data quality rules for mortgage underwriting:
+        
+        Requirements: {query}
+        
+        Context Data:
+        {''.join(context)}
+        
+        Output Format:
+        1. Rule Name: <system.component.unique_id>
+        2. Critical Element: <Y/N>
+        3. Validation Logic: <technical_implementation>
+        4. Error Threshold: <percentage>
+        5. Related Attributes: <comma-separated list>
+        6. Confidence Level: <aggregated_confidence>
+        """
+    }]
+    
+    response = bedrock.invoke_model(
+        body=json.dumps({
+            "messages": messages,
+            "anthropic_version": "bedrock-2023-05-31",
+            "max_tokens": 2048,
+            "temperature": 0.3
+        }),
+        modelId=LLM_MODEL
+    )
+    
+    return {
+        "rules": json.loads(response["body"].read())["content"][0]["text"],
+        "context_sources": [doc["metadata"]["attribute"] for doc in results]
+    }
+6. Critical Data Element Analysis
+python
+def analyze_critical_elements(confidence_threshold: float = 0.7) -> dict:
+    """Identify critical elements with confidence scoring"""
+    pipeline = [
+        {"$match": {
+            "metadata.confidence": {"$gte": confidence_threshold},
+            "metadata.critical": "Y"
+        }},
+        {"$group": {
+            "_id": "$metadata.modules",
+            "elements": {"$push": "$metadata.attribute"},
+            "avg_confidence": {"$avg": "$metadata.confidence"},
+            "rule_count": {"$sum": 1}
+        }},
+        {"$project": {
+            "module": "$_id",
+            "critical_elements": "$elements",
+            "average_confidence": {"$round": ["$avg_confidence", 2]},
+            "rule_count": 1,
+            "_id": 0
+        }}
+    ]
+    
+    return list(collection.aggregate(pipeline))
+Execution Workflow
+python
+if __name__ == "__main__":
+    # 1. Initialize vector index
+    create_vector_index()
+    
+    # 2. Process data files
+    process_records("underwriting_file1.jsonl", "underwriting_file2.jsonl")
+    
+    # 3. Generate sample rules
+    query = """
+    Create validation rules for mortgage applications focusing on:
+    - Income verification accuracy
+    - Debt-to-income ratio calculations
+    - Regulatory compliance (TRID, HMDA)
+    Include cross-system validation between LOS and POS systems
+    """
+    results = generate_dq_rules(query)
+    
+    print("Generated Rules:")
+    print(results["rules"])
+    print("\nSource Attributes:", results["context_sources"])
+    
+    # 4. Critical element analysis
+    critical_report = analyze_critical_elements()
+    print("\nCritical Elements Report:")
+    print(json.dumps(critical_report, indent=2))
+Key Enhancements:
+Optional Field Handling
+
+python
+"priority": int(rule["Rule_Priority"]) if "Rule_Priority" in rule else None
+Cohere-Specific Implementation
+
+1024-dimensional embeddings
+
+Optimized index parameters for Cohere
+
+Input type specification (search_document)
+
+Confidence-Based Filtering
+
+python
+{"$match": {
+    "metadata.confidence": {"$gte": confidence_threshold},
+    "metadata.critical": "Y"
+}}
+Structured Claude 3 Prompts
+
+Formal rule templates
+
+Technical validation logic generation
+
+Confidence aggregation
+
+Data Quality Output
+
+1. Rule Name: income.verification.trid-001
+2. Critical Element: Y  
+3. Validation Logic: 
+   IF income_source NOT IN ['W2', 'TAX_RETURNS', 'BANK_STATEMENTS']
+   OR debt_to_income > 43%
+   THEN FLAG FOR MANUAL REVIEW
+4. Error Threshold: 1.5%
+5. Related Attributes: gross_income, total_debt, loan_amount
+6. Confidence Level: 88%
+To implement:
+
+Create DocumentDB index using create_vector_index()
+
+Process your files with process_records()
+
+Test with sample queries
+
+Adjust confidence thresholds as needed
+
+This implementation follows financial services best practices with:
+
+Regulatory compliance tracking
+
+Audit-ready context sourcing
+
+Confidence-based decision making
+
+Cross-system validation support
+
+Proper handling of optional fields
+
