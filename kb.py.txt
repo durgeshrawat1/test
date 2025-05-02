@@ -264,3 +264,23 @@ if __name__ == "__main__":
     else:
         print("\n--- Setup Failed: Could not create or find Knowledge Base ---")
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Important Notes & Prerequisites:IAM Role (roleArn): This is the most critical part. The IAM role you provide must have a trust policy allowing the Bedrock service (bedrock.amazonaws.com) to assume it. It also needs the following permissions (attach these to the role):OpenSearch Access: Permissions to describe the domain, write to the specified index (es:ESHttpPut, es:ESHttpPost on the index resource), and potentially es:ESHttpGet depending on Bedrock's internal checks. Crucially, it needs VPC access permissions (ec2:CreateNetworkInterface, ec2:DescribeNetworkInterfaces, ec2:DeleteNetworkInterface, ec2:DescribeSubnets, ec2:DescribeSecurityGroups, ec2:DescribeVpcs). Grant these permissions carefully, ideally scoped to the specific VPC resources.S3 Access: s3:GetObject permissions for the input bucket (your-input-data-bucket/*) and s3:ListBucket for the bucket itself (your-input-data-bucket).KMS Access: kms:GenerateDataKey, kms:Decrypt, and kms:DescribeKey permissions on the specified KMS key (your-kms-key-id). The KMS key policy must also allow the IAM role to perform these actions.Bedrock Model Access: bedrock:InvokeModel permission for the specified embedding model ARN.OpenSearch Index: You need to create the target vector index (my-bedrock-vector-index in the example) in your OpenSearch cluster before running this script. The index mapping should include fields matching vectorField, textField, and metadataField with appropriate types (e.g., knn_vector for the vector field, text for text, object or specific types for metadata). The vector field's dimension must match the output dimension of your chosen embedding model.VPC Networking: Ensure the subnets and security groups provided allow traffic from Bedrock's service endpoints to your OpenSearch domain endpoint on port 443 (HTTPS). This might involve adjusting security group inbound rules or Network ACLs.Replace Placeholders: Carefully replace all placeholder values (ARNs, IDs, endpoints, names) in the --- Configuration --- section with your actual resource details.Error Handling: The script includes basic error handling and polling for resource creation status. You might need more robust error checking depending on your production needs.Ingestion: The final step in the script, start_ingestion_job, triggers the actual processing. Bedrock will read files from your S3 source, chunk them, generate embeddings using the specified model, and write the text, metadata, and vectors to your OpenSearch index, encrypting the data at rest using your KMS key. Monitor this job's progress in the AWS console under Bedrock -> Knowledge Bases.This code provides the foundation for setting up your Knowledge Base with a private OpenSearch cluster and KMS encryption. Remember to configure the IAM role and OpenSearch index correctly before execution.
