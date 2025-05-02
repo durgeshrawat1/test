@@ -1,0 +1,266 @@
+import boto3
+import json
+import time
+
+# --- Configuration - Replace with your values ---
+
+# AWS Region
+aws_region = "us-east-1"  # e.g., 'us-east-1'
+
+# Knowledge Base Configuration
+kb_name = "my-private-opensearch-kb"
+kb_description = "Knowledge base using private OpenSearch cluster"
+# Role ARN: This IAM role must grant Bedrock permissions to access
+# OpenSearch, S3 (for data source), KMS, and the embedding model.
+# See notes below for required permissions.
+role_arn = "arn:aws:iam::123456789012:role/BedrockKnowledgeBaseExecutionRole"
+# Embedding Model ARN (e.g., Amazon Titan Embeddings G1 - Text)
+embedding_model_arn = f"arn:aws:bedrock:{aws_region}::foundation-model/amazon.titan-embed-text-v1"
+
+# OpenSearch Service Configuration (Self-Managed Cluster in VPC)
+opensearch_domain_endpoint = "vpc-your-os-domain-abc123xyz.us-east-1.es.amazonaws.com" # Your VPC domain endpoint (without https://)
+opensearch_vector_index_name = "my-bedrock-vector-index"
+opensearch_vector_field = "bedrock-knowledge-base-vector"
+opensearch_text_field = "bedrock-knowledge-base-text"
+opensearch_metadata_field = "bedrock-knowledge-base-metadata"
+
+# VPC Configuration for OpenSearch Access
+# Bedrock needs these to connect to your private OpenSearch cluster
+subnet_ids = ["subnet-0abcd1234efgh5678", "subnet-0ijkl9876mnop5432"] # List of subnet IDs in your VPC where OS is accessible
+security_group_ids = ["sg-0fedcba9876543210"] # List of security group IDs allowing Bedrock access to OS domain on port 443
+
+# KMS Customer Managed Key (CMEK) for Encryption
+kms_key_arn = "arn:aws:kms:us-east-1:123456789012:key/your-kms-key-id" # ARN of your KMS key
+
+# S3 Data Source Configuration (Used in the next step, but define ARNs here)
+s3_input_bucket_arn = "arn:aws:s3:::your-input-data-bucket"
+# Optional: Specify prefixes if you only want to index specific folders
+s3_inclusion_prefixes = ["documents/"] # e.g., ["docs/", "pdfs/"] or None
+
+# --- Initialize Boto3 Client ---
+# Use bedrock-agent runtime for knowledge base operations
+bedrock_agent_client = boto3.client('bedrock-agent', region_name=aws_region)
+
+# --- Function to Create Knowledge Base ---
+def create_knowledge_base():
+    """Creates the Bedrock Knowledge Base."""
+    print(f"Attempting to create Knowledge Base: {kb_name}...")
+    try:
+        response = bedrock_agent_client.create_knowledge_base(
+            name=kb_name,
+            description=kb_description,
+            roleArn=role_arn,
+            knowledgeBaseConfiguration={
+                'type': 'VECTOR',
+                'vectorKnowledgeBaseConfiguration': {
+                    'embeddingModelArn': embedding_model_arn
+                }
+            },
+            storageConfiguration={
+                'type': 'OPENSEARCH', # Use 'OPENSEARCH' for self-managed clusters
+                'opensearchConfiguration': {
+                    'domainEndpoint': opensearch_domain_endpoint,
+                    'vectorIndexName': opensearch_vector_index_name,
+                    'fieldMapping': {
+                        'vectorField': opensearch_vector_field,
+                        'textField': opensearch_text_field,
+                        'metadataField': opensearch_metadata_field
+                    },
+                    # VPC configuration is required for private OpenSearch domains
+                    'vpcConfiguration': {
+                        'subnetIds': subnet_ids,
+                        'securityGroupIds': security_group_ids
+                    }
+                }
+            },
+            # Specify the KMS key for encryption
+            serverSideEncryptionConfiguration={
+                'kmsKeyArn': kms_key_arn
+            }
+            # tags={ # Optional tags
+            #     'Project': 'MyBedrockProject',
+            #     'Environment': 'Development'
+            # }
+        )
+        kb = response['knowledgeBase']
+        kb_id = kb['knowledgeBaseId']
+        kb_arn = kb['knowledgeBaseArn']
+        kb_status = kb['status']
+
+        print(f"Knowledge Base creation initiated. ID: {kb_id}, ARN: {kb_arn}")
+        print("Waiting for Knowledge Base to become ACTIVE...")
+
+        # Poll until the knowledge base is active
+        while kb_status != 'ACTIVE':
+            time.sleep(10) # Wait for 10 seconds before checking again
+            kb_details = bedrock_agent_client.get_knowledge_base(knowledgeBaseId=kb_id)['knowledgeBase']
+            kb_status = kb_details['status']
+            print(f"  Current status: {kb_status}")
+            if kb_status == 'FAILED':
+                print(f"Knowledge Base creation failed: {kb_details.get('failureReasons', 'No reason provided')}")
+                return None, None
+            elif kb_status == 'ACTIVE':
+                print("Knowledge Base is ACTIVE.")
+                return kb_id, kb_arn
+
+        return kb_id, kb_arn # Should be active if loop exits normally
+
+    except bedrock_agent_client.exceptions.ConflictException:
+        print(f"Knowledge Base '{kb_name}' already exists. Fetching its details...")
+        # If it already exists, try to get its ID and ARN
+        try:
+            list_response = bedrock_agent_client.list_knowledge_bases()
+            for kb_summary in list_response.get('knowledgeBaseSummaries', []):
+                if kb_summary['name'] == kb_name:
+                    kb_id = kb_summary['knowledgeBaseId']
+                    kb_details = bedrock_agent_client.get_knowledge_base(knowledgeBaseId=kb_id)['knowledgeBase']
+                    print(f"Found existing Knowledge Base. ID: {kb_id}, ARN: {kb_details['knowledgeBaseArn']}, Status: {kb_details['status']}")
+                    # You might want to check if the status is ACTIVE here as well
+                    if kb_details['status'] != 'ACTIVE':
+                         print(f"Warning: Existing Knowledge Base status is {kb_details['status']}. Waiting might be needed.")
+                         # Add waiting logic similar to the creation block if needed
+                    return kb_id, kb_details['knowledgeBaseArn']
+            print(f"Could not find details for existing knowledge base named '{kb_name}'.")
+            return None, None
+        except Exception as e:
+            print(f"Error fetching existing knowledge base: {e}")
+            return None, None
+    except Exception as e:
+        print(f"Error creating Knowledge Base: {e}")
+        return None, None
+
+# --- Function to Create Data Source ---
+def create_s3_data_source(knowledge_base_id):
+    """Creates the S3 Data Source for the Knowledge Base."""
+    ds_name = f"{kb_name}-s3-source"
+    print(f"\nAttempting to create Data Source: {ds_name} for Knowledge Base ID: {knowledge_base_id}...")
+
+    try:
+        ds_config = {
+            'type': 'S3',
+            's3Configuration': {
+                'bucketArn': s3_input_bucket_arn,
+            }
+        }
+        # Add inclusion prefixes if specified
+        if s3_inclusion_prefixes:
+            ds_config['s3Configuration']['inclusionPrefixes'] = s3_inclusion_prefixes
+
+        # Optional: Configure chunking strategy
+        # vector_ingestion_config = {
+        #     'chunkingConfiguration': {
+        #         'chunkingStrategy': 'FIXED_SIZE',
+        #         'fixedSizeChunkingConfiguration': {
+        #             'maxTokens': 300,
+        #             'overlapPercentage': 20
+        #         }
+        #     }
+        # }
+
+        response = bedrock_agent_client.create_data_source(
+            knowledgeBaseId=knowledge_base_id,
+            name=ds_name,
+            description="S3 data source for documents",
+            dataSourceConfiguration=ds_config,
+            # vectorIngestionConfiguration=vector_ingestion_config, # Uncomment to add chunking config
+            serverSideEncryptionConfiguration={ # Use the same KMS key for the data source
+                 'kmsKeyArn': kms_key_arn
+            }
+        )
+
+        ds = response['dataSource']
+        ds_id = ds['dataSourceId']
+        ds_status = ds['status']
+        print(f"Data Source creation initiated. ID: {ds_id}")
+        print("Waiting for Data Source to become AVAILABLE...")
+
+        # Poll until the data source is available
+        while ds_status != 'AVAILABLE':
+            time.sleep(10) # Wait for 10 seconds
+            ds_details = bedrock_agent_client.get_data_source(knowledgeBaseId=knowledge_base_id, dataSourceId=ds_id)['dataSource']
+            ds_status = ds_details['status']
+            print(f"  Current status: {ds_status}")
+            if ds_status == 'DELETE_UNSUCCESSFUL': # Or other failure states
+                 print(f"Data Source creation failed: {ds_details.get('failureReasons', 'No reason provided')}")
+                 return None
+            elif ds_status == 'AVAILABLE':
+                 print("Data Source is AVAILABLE.")
+                 return ds_id
+
+        return ds_id # Should be available if loop exits normally
+
+    except bedrock_agent_client.exceptions.ConflictException:
+         print(f"Data Source '{ds_name}' already exists for this Knowledge Base. Fetching its ID...")
+         try:
+             list_response = bedrock_agent_client.list_data_sources(knowledgeBaseId=knowledge_base_id)
+             for ds_summary in list_response.get('dataSourceSummaries', []):
+                 if ds_summary['name'] == ds_name:
+                     ds_id = ds_summary['dataSourceId']
+                     ds_details = bedrock_agent_client.get_data_source(knowledgeBaseId=knowledge_base_id, dataSourceId=ds_id)['dataSource']
+                     print(f"Found existing Data Source. ID: {ds_id}, Status: {ds_details['status']}")
+                     if ds_details['status'] != 'AVAILABLE':
+                         print(f"Warning: Existing Data Source status is {ds_details['status']}. Waiting might be needed.")
+                         # Add waiting logic if needed
+                     return ds_id
+             print(f"Could not find details for existing data source named '{ds_name}'.")
+             return None
+         except Exception as e:
+             print(f"Error fetching existing data source: {e}")
+             return None
+    except Exception as e:
+        print(f"Error creating Data Source: {e}")
+        return None
+
+# --- Function to Start Ingestion Job ---
+def start_ingestion_job(knowledge_base_id, data_source_id):
+    """Starts an ingestion job for the specified data source."""
+    print(f"\nStarting ingestion job for Data Source ID: {data_source_id} in Knowledge Base ID: {knowledge_base_id}...")
+    try:
+        response = bedrock_agent_client.start_ingestion_job(
+            knowledgeBaseId=knowledge_base_id,
+            dataSourceId=data_source_id,
+            description="Initial data ingestion" # Optional description
+        )
+        job = response['ingestionJob']
+        job_id = job['ingestionJobId']
+        job_status = job['status']
+        print(f"Ingestion job started. ID: {job_id}, Status: {job_status}")
+        print("You can monitor the job progress in the AWS Console or using the GetIngestionJob API.")
+        # Optionally, add polling here to wait for completion/failure
+        # while job_status in ['STARTING', 'IN_PROGRESS']:
+        #    time.sleep(30)
+        #    job_details = bedrock_agent_client.get_ingestion_job(...)['ingestionJob']
+        #    job_status = job_details['status']
+        #    print(f"  Ingestion job status: {job_status}")
+        # print(f"Ingestion job finished with status: {job_status}")
+        return job_id
+    except Exception as e:
+        print(f"Error starting ingestion job: {e}")
+        return None
+
+# --- Main Execution ---
+if __name__ == "__main__":
+    # 1. Create the Knowledge Base
+    knowledge_base_id, knowledge_base_arn = create_knowledge_base()
+
+    if knowledge_base_id:
+        # 2. Create the Data Source
+        data_source_id = create_s3_data_source(knowledge_base_id)
+
+        if data_source_id:
+            # 3. Start the Ingestion Job (This processes S3 data -> Embeddings -> OpenSearch)
+            ingestion_job_id = start_ingestion_job(knowledge_base_id, data_source_id)
+
+            if ingestion_job_id:
+                print("\n--- Setup Complete ---")
+                print(f"Knowledge Base ARN: {knowledge_base_arn}")
+                print(f"Data Source ID: {data_source_id}")
+                print(f"Ingestion Job ID: {ingestion_job_id}")
+                print("Monitor the ingestion job in the AWS Console.")
+            else:
+                print("\n--- Setup Incomplete: Failed to start ingestion job ---")
+        else:
+            print("\n--- Setup Incomplete: Failed to create data source ---")
+    else:
+        print("\n--- Setup Failed: Could not create or find Knowledge Base ---")
+
