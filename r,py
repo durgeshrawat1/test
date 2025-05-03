@@ -1,0 +1,76 @@
+import boto3
+from pymongo import MongoClient
+from pymongo.server_api import ServerApi
+import os
+
+# Configure environment variables
+DOCDB_URI = os.getenv('DOCDB_URI', 'mongodb://user:pass@docdb-cluster:27017')
+BEDROCK_REGION = os.getenv('BEDROCK_REGION', 'us-east-1')
+
+# Initialize clients
+bedrock = boto3.client(service_name='bedrock-runtime', region_name=BEDROCK_REGION)
+docdb_client = MongoClient(DOCDB_URI, server_api=ServerApi('1'))
+
+def get_titan_embedding(text):
+    """Generate embeddings using Titan Embeddings model"""
+    response = bedrock.invoke_model(
+        body=json.dumps({"inputText": text}),
+        modelId='amazon.titan-embed-text-v1',
+        accept='application/json',
+        contentType='application/json'
+    )
+    return json.loads(response['body'].read())['embedding']
+
+def query_documentdb(question, collection_name='your_collection', top_k=3):
+    """Vector similarity search in DocumentDB"""
+    collection = docdb_client.your_db[collection_name]
+    embedding = get_titan_embedding(question)
+    
+    return collection.aggregate([
+        {
+            "$vectorSearch": {
+                "index": "your_vector_index",
+                "path": "embedding",
+                "queryVector": embedding,
+                "numCandidates": 100,
+                "limit": top_k
+            }
+        },
+        {
+            "$project": {
+                "_id": 0,
+                "text": 1,
+                "score": {"$meta": "vectorSearchScore"}
+            }
+        }
+    ])
+
+def generate_answer(question, context):
+    """Generate answer using Anthropic Claude Sonnet"""
+    prompt = f"""Human: Answer the question based on the context below. Be concise.
+    
+    <context>
+    {context}
+    </context>
+    
+    Question: {question}
+    
+    Assistant:"""
+    
+    response = bedrock.invoke_model(
+        modelId='anthropic.claude-3-sonnet-20240229-v1:0',
+        body=json.dumps({
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": 1000
+        })
+    )
+    return json.loads(response['body'].read())['content'][0]['text']
+
+# Example usage
+question = "Your question here"
+context_docs = list(query_documentdb(question))
+context = "\n".join([doc['text'] for doc in context_docs])
+
+answer = generate_answer(question, context)
+print(f"Question: {question}")
+print(f"Answer: {answer}")
