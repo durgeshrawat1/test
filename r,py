@@ -1,76 +1,79 @@
 import boto3
 from pymongo import MongoClient
-from pymongo.server_api import ServerApi
 import os
+import json
 
-# Configure environment variables
-DOCDB_URI = os.getenv('DOCDB_URI', 'mongodb://user:pass@docdb-cluster:27017')
-BEDROCK_REGION = os.getenv('BEDROCK_REGION', 'us-east-1')
+# Configuration - Update these values
+DOCDB_URI = os.getenv('DOCDB_URI', 'mongodb://user:pass@docdb-cluster:27017/?tls=true&retryWrites=false')
+BEDROCK_REGION = 'us-east-1'  # Update your region
 
-# Initialize clients
-bedrock = boto3.client(service_name='bedrock-runtime', region_name=BEDROCK_REGION)
-docdb_client = MongoClient(DOCDB_URI, server_api=ServerApi('1'))
+# Initialize modern Bedrock client
+session = boto3.Session()
+bedrock = session.client(service_name='bedrock-agent-runtime', region_name=BEDROCK_REGION)
 
-def get_titan_embedding(text):
-    """Generate embeddings using Titan Embeddings model"""
+# DocumentDB client with 2025 connection requirements
+docdb_client = MongoClient(
+    DOCDB_URI,
+    server_api=ServerApi('1'),
+    tls=True,
+    tlsCAFile='/path/to/rds-combined-ca-bundle.pem'  # Required for DocumentDB TLS
+)
+
+def get_embedding(text: str) -> list:
+    """AWS Titan 2025 Embeddings with new API format"""
     response = bedrock.invoke_model(
-        body=json.dumps({"inputText": text}),
-        modelId='amazon.titan-embed-text-v1',
-        accept='application/json',
-        contentType='application/json'
+        modelId='amazon.titan-embed-g1-text-2025',  # Updated 2025 model ID
+        body=json.dumps({
+            "inputText": text,
+            "embeddingConfig": {
+                "dimensions": 1024  # Must match collection index dimension
+            }
+        })
     )
     return json.loads(response['body'].read())['embedding']
 
-def query_documentdb(question, collection_name='your_collection', top_k=3):
-    """Vector similarity search in DocumentDB"""
-    collection = docdb_client.your_db[collection_name]
-    embedding = get_titan_embedding(question)
+def vector_search(query: str) -> list:
+    """2025 DocumentDB vector search syntax"""
+    collection = docdb_client.your_db.your_collection
+    embedding = get_embedding(query)
     
-    return collection.aggregate([
+    return list(collection.aggregate([
         {
             "$vectorSearch": {
                 "index": "your_vector_index",
-                "path": "embedding",
                 "queryVector": embedding,
-                "numCandidates": 100,
-                "limit": top_k
+                "path": "embedding",
+                "numCandidates": 150,  # Updated 2025 recommendation
+                "limit": 3,
+                "filter": {}  # Required in 2025 syntax
             }
         },
-        {
-            "$project": {
-                "_id": 0,
-                "text": 1,
-                "score": {"$meta": "vectorSearchScore"}
-            }
-        }
-    ])
+        {"$project": {"text": 1, "score": {"$meta": "searchScore"}}}
+    ]))
 
-def generate_answer(question, context):
-    """Generate answer using Anthropic Claude Sonnet"""
-    prompt = f"""Human: Answer the question based on the context below. Be concise.
-    
-    <context>
-    {context}
-    </context>
-    
-    Question: {question}
-    
-    Assistant:"""
-    
+def generate_answer(query: str, context: str) -> str:
+    """Anthropic Claude Sonnet 2025 API format"""
     response = bedrock.invoke_model(
-        modelId='anthropic.claude-3-sonnet-20240229-v1:0',
+        modelId='anthropic.claude-3-sonnet-2025-v1.0',
         body=json.dumps({
-            "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": 1000
+            "system": "Answer using only the provided context",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": f"Question: {query}"},
+                    {"type": "text", "text": f"Context: {context}"}
+                ]
+            }],
+            "max_tokens": 1024,
+            "temperature": 0.5
         })
     )
     return json.loads(response['body'].read())['content'][0]['text']
 
-# Example usage
-question = "Your question here"
-context_docs = list(query_documentdb(question))
-context = "\n".join([doc['text'] for doc in context_docs])
-
+# Usage Example
+question = "What's the capital of France?"
+results = vector_search(question)
+context = "\n".join([doc['text'] for doc in results])
 answer = generate_answer(question, context)
-print(f"Question: {question}")
-print(f"Answer: {answer}")
+
+print(f"Q: {question}\nA: {answer}")
