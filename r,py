@@ -1,79 +1,56 @@
-import boto3
 from pymongo import MongoClient
-import os
+from bson import Binary
+import struct
+import boto3
 import json
 
-# Configuration - Update these values
-DOCDB_URI = os.getenv('DOCDB_URI', 'mongodb://user:pass@docdb-cluster:27017/?tls=true')
-BEDROCK_REGION = 'us-east-1'  # Update your region
-CA_FILE = '/etc/ssl/certs/rds-combined-ca-bundle.pem'  # Standard EC2 CA path
+def get_embedding(text: str) -> list:
+    """AWS Titan 2025 Embedding Generation"""
+    bedrock = boto3.client('bedrock-runtime', region_name='us-east-1')
+    
+    response = bedrock.invoke_model(
+        modelId='amazon.titan-embed-text-v2:0',
+        body=json.dumps({
+            "inputText": text,
+            "embeddingConfig": {
+                "dimensions": 1024,
+                "normalize": True  # Required for DocumentDB compatibility
+            }
+        })
+    )
+    embedding = json.loads(response['body'].read())['embedding']
+    
+    # DocumentDB requires float32 precision
+    return [float(x) for x in embedding]
 
-# Initialize clients directly
-bedrock = boto3.client('bedrock-runtime', region_name=BEDROCK_REGION)
-docdb_client = MongoClient(
-    DOCDB_URI,
-    tls=True,
-    tlsCAFile=CA_FILE,
-    retryWrites=False,
-    server_api=ServerApi('1')
-)
-
-def get_embedding(text: str) -> list[float]:
-    """Direct Titan 2025 embedding generation"""
-    try:
-        response = bedrock.invoke_model(
-            modelId='amazon.titan-embed-text-v2:0',
-            body=json.dumps({'text': text})
-        return json.loads(response['body'].read())['embedding']
-    except Exception as e:
-        print(f"Embedding error: {str(e)}")
-        raise
-
-def query_documents(question: str, top_k: int = 3) -> list:
-    """Simplified 2025 DocumentDB vector search"""
-    try:
-        collection = docdb_client.your_db.your_collection
+def query_documents(question: str) -> list:
+    """DocumentDB 2025 Vector Search Syntax"""
+    DOCDB_URI = "mongodb://user:pass@docdb-cluster:27017/?tls=true&retryWrites=false"
+    
+    with MongoClient(
+        DOCDB_URI,
+        tls=True,
+        tlsCAFile='/etc/ssl/certs/rds-combined-ca-bundle.pem',
+        server_api=ServerApi('1')
+    ) as client:
+        
+        collection = client.your_db.your_collection
         embedding = get_embedding(question)
+        
+        # Convert to BSON Binary for DocumentDB
+        binary_vector = Binary(struct.pack(f'{len(embedding)}f', *embedding))
         
         return list(collection.aggregate([
             {
                 "$vectorSearch": {
                     "index": "vector_index",
                     "path": "embedding",
-                    "queryVector": embedding,
-                    "numCandidates": 100,
-                    "limit": top_k
+                    "queryVector": binary_vector,
+                    "numCandidates": 200,  # Must be ≥100 for 2025 DocumentDB
+                    "limit": 3,
+                    "filter": {},  # Required even when empty
+                    "options": {"efSearch": 128}  # Required for IVF indexes
                 }
             },
-            {"$project": {"text": 1, "_id": 0}}
+            {"$project": {"text": 1, "score": {"$meta": "vectorSearchScore"}}
         ]))
-    except Exception as e:
-        print(f"Query error: {str(e)}")
-        raise
-
-def generate_response(question: str) -> str:
-    """Direct Claude 3 Sonnet invocation"""
-    try:
-        context_docs = query_documents(question)
-        context = "\n".join([doc['text'] for doc in context_docs])
-        
-        response = bedrock.invoke_model(
-            modelId='anthropic.claude-3-sonnet-v1:0',
-            body=json.dumps({
-                "messages": [{
-                    "role": "user",
-                    "content": f"Answer this based on context:\n{context}\nQuestion: {question}"
-                }],
-                "max_tokens": 1024
-            })
-        )
-        return json.loads(response['body'].read())['content'][0]['text']
-    except Exception as e:
-        print(f"Generation error: {str(e)}")
-        raise
-
-# Usage
-if __name__ == "__main__":
-    question = "Your question here"
-    print(f"Q: {question}")
-    print(f"A: {generate_response(question)}")
