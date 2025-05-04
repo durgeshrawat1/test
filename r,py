@@ -2,6 +2,8 @@ import os
 import json
 import boto3
 import pymongo
+import numpy as np
+from sklearn.metrics.pairwise import cosine_similarity
 
 # Initialize AWS clients
 bedrock_runtime = boto3.client("bedrock-runtime", region_name=os.getenv("AWS_REGION"))
@@ -29,21 +31,27 @@ def generate_embedding(text: str) -> list:
     return json.loads(response['body'].read())["embedding"]
 
 def search_similar_documents(query_embedding: list, k: int = 3):
-    """Search for similar documents using DocumentDB's HNSW vector index."""
-    pipeline = [
-        {
-            "$search": {
-                "index": "your_hnsw_index",  # Ensure you have the correct index name
-                "knnBeta": {
-                    "vector": query_embedding,
-                    "path": "embedding",  # Field in DocumentDB containing your vector embeddings
-                    "k": k
-                }
-            }
-        },
-        {"$project": {"_id": 0, "text": 1}}  # Project only the text field
-    ]
-    return list(collection.aggregate(pipeline))
+    """Search for similar documents by calculating cosine similarity with DocumentDB embeddings."""
+    # Fetch embeddings from DocumentDB
+    cursor = collection.find({}, {"_id": 0, "text": 1, "embedding": 1})  # Adjust this to include embeddings
+    document_embeddings = []
+    documents = []
+    
+    for doc in cursor:
+        documents.append(doc)
+        document_embeddings.append(doc["embedding"])  # Assuming embeddings are stored in 'embedding' field
+
+    # Convert the list of document embeddings to a numpy array
+    document_embeddings = np.array(document_embeddings)
+
+    # Calculate cosine similarity between the query embedding and document embeddings
+    similarities = cosine_similarity([query_embedding], document_embeddings)[0]
+
+    # Sort documents based on similarity score and get the top k
+    top_k_indices = similarities.argsort()[-k:][::-1]
+
+    # Return the top k documents
+    return [documents[i] for i in top_k_indices]
 
 def generate_response(prompt: str):
     """Generate a response using AWS Bedrock's Claude model (2025 version)."""
@@ -75,7 +83,7 @@ def main():
         query_embedding = generate_embedding(user_input)
 
         print("→ Searching DocumentDB for relevant documents...")
-        # Step 2: Search for similar documents from DocumentDB using HNSW index
+        # Step 2: Search for similar documents using manual cosine similarity
         documents = search_similar_documents(query_embedding)
 
         if not documents:
