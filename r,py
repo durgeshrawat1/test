@@ -1,302 +1,108 @@
-Okay, let's outline the steps and components involved in building a RAG system using AWS Bedrock and Amazon DocumentDB with your existing vector embeddings.
-
-Core Concept of RAG with DocumentDB and Bedrock:
-
-User Query: A user asks a question.
-Query Embedding: You'll use the same AWS Titan Text Embedding model (via Bedrock) to convert the user's query into a 1024-dimension vector embedding.
-Vector Search: This query embedding is used to search your DocumentDB collection using the rag_vector_index. DocumentDB's vector search capability (likely using the $vectorSearch aggregation pipeline stage if you are using DocumentDB 5.0 or later with vector search enabled) finds the documents whose stored embeddings are most similar (e.g., using cosine similarity or Euclidean distance) to the query embedding.
-Context Retrieval: You retrieve the actual text content associated with the top-k most similar vector embeddings found in the search. This text becomes the "context" for the language model.
-Prompt Augmentation: You construct a prompt for a generative foundation model available in Bedrock (e.g., Anthropic's Claude, AI21 Labs' Jurassic, or Amazon's Titan Text). This prompt typically includes:
-The retrieved context from DocumentDB.
-The original user query.
-Instructions for the model (e.g., "Answer the following question based only on the provided context: [User Query]").
-Answer Generation: You send this augmented prompt to the chosen Bedrock foundation model. The model generates an answer based on the provided context and the user's query.
-Response: The generated answer is returned to the user.
-Steps and Code Considerations (using Python with Boto3 and PyMongo):
-
-Prerequisites:
-
-Ensure you have the necessary AWS credentials configured (via IAM roles, environment variables, or AWS configuration files).
-Install required Python libraries: boto3 (AWS SDK), pymongo (for DocumentDB interaction).
-Make sure your DocumentDB cluster version supports vector search and the index rag_vector_index is correctly configured (using HNSW or IVF, specifying dimensions and similarity metric).
-Initialize Clients:
-
-Python
-
-import boto3
-import pymongo
-import json
-
-# Bedrock Runtime Client
-bedrock_runtime = boto3.client(
-    service_name='bedrock-runtime',
-    region_name='us-east-1' # Replace with your Bedrock region if different
-)
-
-# DocumentDB Client (Replace with your connection details)
-docdb_connection_string = "mongodb://<user>:<password>@<your-docdb-cluster-endpoint>:<port>/?tls=true&tlsCAFile=global-bundle.pem&replicaSet=rs0&readPreference=secondaryPreferred&retryWrites=false"
-docdb_client = pymongo.MongoClient(docdb_connection_string)
-db = docdb_client['your_database_name'] # Replace with your DB name
-collection = db['your_collection_name'] # Replace with your collection name
-
-# Embedding Model and LLM Model IDs
-embedding_model_id = 'amazon.titan-embed-text-v1' # Or the specific Titan Text embedding model you used
-llm_model_id = 'anthropic.claude-v2' # Example: Choose a suitable LLM
-Function to Generate Embeddings (Bedrock):
-
-Python
-
-def generate_embedding(text_input):
-    """Generates embedding for the given text using Bedrock."""
-    try:
-        body = json.dumps({"inputText": text_input})
-        response = bedrock_runtime.invoke_model(
-            body=body,
-            modelId=embedding_model_id,
-            accept='application/json',
-            contentType='application/json'
-        )
-        response_body = json.loads(response.get('body').read())
-        embedding = response_body.get('embedding')
-        return embedding
-    except Exception as e:
-        print(f"Error generating embedding: {e}")
-        return None
-Function for Vector Search (DocumentDB):
-
-Python
-
-def search_documentdb(query_embedding, k=5):
-    """Performs vector search in DocumentDB."""
-    if not query_embedding:
-        return []
-
-    pipeline = [
-        {
-            '$vectorSearch': {
-                'index': 'rag_vector_index', # Your index name
-                'path': 'embedding_field_name', # The field containing the 1024-dim vector
-                'queryVector': query_embedding,
-                'numCandidates': k * 10, # Number of candidates to consider (adjust as needed)
-                'limit': k # Number of results to return
-                # 'filter': { Optional: Add metadata filters here }
-            }
-        },
-        {
-            '$project': { # Project necessary fields, exclude the large vector if not needed
-                '_id': 0,
-                'text_content_field': 1, # The field containing the original text chunk
-                'metadata_field': 1, # Any other relevant metadata
-                'score': { '$meta': 'vectorSearchScore' } # Retrieve the similarity score
-            }
-        }
-    ]
-    try:
-        results = list(collection.aggregate(pipeline))
-        return results
-    except pymongo.errors.OperationFailure as e:
-         # Check if the error is related to $vectorSearch not being supported/enabled
-        if "$vectorSearch is not allowed" in str(e) or "Unrecognized pipeline stage name" in str(e):
-             print(f"Error: $vectorSearch may not be enabled or supported on your DocumentDB cluster version/instance type. Details: {e}")
-        else:
-            print(f"Error during DocumentDB vector search: {e}")
-        return []
-    except Exception as e:
-        print(f"An unexpected error occurred during DocumentDB search: {e}")
-        return []
-
-Important: Replace 'embedding_field_name' with the actual name of the field in your DocumentDB documents where the 1024-dimension vector is stored.
-Replace 'text_content_field' with the field name containing the original text chunk corresponding to the vector.
-Ensure your DocumentDB instance class and version support $vectorSearch. As of late 2023/early 2024, specific instance types and DocumentDB 5.0+ were required. Check the latest AWS documentation.
-Function to Invoke LLM (Bedrock):
-
-Python
-
-def get_llm_response(prompt):
-    """Gets response from the Bedrock LLM."""
-    try:
-        # Note: Payload structure varies between models (Claude, Titan, etc.)
-        # This is an example for Claude v2/v2.1
-        body = json.dumps({
-            "prompt": f"\n\nHuman:{prompt}\n\nAssistant:", # Specific prompt format for Claude
-            "max_tokens_to_sample": 500,
-            "temperature": 0.1,
-            "top_p": 0.9,
-        })
-
-        response = bedrock_runtime.invoke_model(
-            body=body,
-            modelId=llm_model_id,
-            accept='application/json',
-            contentType='application/json'
-        )
-        response_body = json.loads(response.get('body').read())
-        # Adjust parsing based on the chosen LLM's response structure
-        answer = response_body.get('completion')
-        return answer
-    except Exception as e:
-        print(f"Error invoking LLM: {e}")
-        return None
-Crucial: The body structure and the key for the response text (completion in Claude's case) differ significantly between Bedrock models. Consult the AWS Bedrock documentation for the specific invoke_model request/response syntax for your chosen llm_model_id.
-Putting it Together (RAG Workflow):
-
-Python
-
-def perform_rag(user_query, top_k=3):
-    """Executes the RAG pipeline."""
-    print(f"User Query: {user_query}")
-
-    # 1. Generate Query Embedding
-    query_embedding = generate_embedding(user_query)
-    if not query_embedding:
-        return "Error: Could not generate query embedding."
-    print("Generated query embedding.")
-
-    # 2. Perform Vector Search
-    search_results = search_documentdb(query_embedding, k=top_k)
-    if not search_results:
-         # Check if the error was $vectorSearch specific or general
-         # You might need more robust error handling based on search_documentdb's potential return values/exceptions
-         print("No relevant documents found or error during search.")
-         # Optionally, attempt generation without context or return a specific message
-         # return "Could not find relevant information in the document database."
-
-    print(f"Retrieved {len(search_results)} relevant document(s).")
-
-    # 3. Prepare Context
-    context = ""
-    if search_results:
-         context = "\n\n".join([result.get('text_content_field', '') for result in search_results])
-         print("Context prepared.")
-         # print(f"Context:\n{context[:500]}...") # Print start of context for debugging
-    else:
-         print("Proceeding without context from DocumentDB.")
-
-
-    # 4. Construct Prompt
-    # Example prompt structure (adapt as needed)
-    prompt = f"""Based on the following context, please answer the question. If the context does not contain the answer, say 'I cannot answer based on the provided context'.
-
-Context:
-{context if context else "No context provided."}
-
-Question: {user_query}
-
-Answer:"""
-
-    # 5. Get LLM Response
-    final_answer = get_llm_response(prompt)
-
-    if final_answer:
-        return final_answer
-    else:
-        return "Error: Could not get response from the language model."
-
-# --- Example Usage ---
-query = "What is the process for onboarding new employees?"
-response = perform_rag(query)
-print("\nFinal Answer:\n", response)
-
-# --- Clean up ---
-docdb_client.close()
-```
-Key Considerations & Next Steps:
-
-Error Handling: Add more robust error handling throughout the process.
-Model Selection: Choose the Bedrock foundation model (llm_model_id) that best suits your needs (cost, performance, specific capabilities). Remember to adapt the invoke_model payload accordingly.
-Prompt Engineering: Experiment with different prompt structures to get the best results from the LLM. Clearly instructing the model on how to use the context is vital.
-DocumentDB Indexing: Ensure your rag_vector_index is optimized (correct similarity metric, appropriate numCandidates in the search).
-Chunking Strategy: How you split your original documents into chunks (which are then embedded) significantly impacts RAG performance. Ensure chunks are reasonably sized and self-contained.
-Permissions: The IAM role or user executing this code needs permissions for bedrock:InvokeModel and access to your DocumentDB cluster.
-DocumentDB Version/Instance: Double-check that your DocumentDB setup fully supports the $vectorSearch operator. You might need to upgrade or change instance types.
-This framework provides a solid starting point for building your RAG application using DocumentDB and Bedrock. Remember to replace placeholders, adjust parameters, and consult the specific AWS documentation for DocumentDB vector search and Bedrock model invocation.
-Okay, you have the core components in place: vector embeddings in DocumentDB, a vector index, and the desire to use AWS Bedrock for both embedding generation (for queries) and final answer generation (LLM). Here's a breakdown of how to implement the RAG (Retrieval-Augmented Generation) pattern for your scenario:
-
-Core RAG Workflow
-
-Receive User Query: Your application gets a question from the user.
-Embed the Query: Use the same AWS Titan Text Embedding model (amazon.titan-embed-text-v1 or similar, the one you used originally) via the Bedrock Runtime API to convert the user's query into a 1024-dimension vector.
-Search DocumentDB: Execute a vector similarity search against your DocumentDB collection using the query vector. You'll use the $vectorSearch aggregation pipeline stage, targeting your rag_vector_index. This finds the documents whose stored embeddings are most similar to the query's embedding.
-Retrieve Context: Extract the original text content associated with the top 'k' (e.g., top 3 or 5) documents returned by the vector search. This text serves as the relevant context.
-Construct Augmented Prompt: Create a prompt for a Bedrock foundation model (like Anthropic Claude, Amazon Titan Text Large/Express, etc.). This prompt should include:
-The retrieved context from DocumentDB.
-The original user query.
-Clear instructions for the model (e.g., "Answer the user's question based only on the provided context.").
-Generate Answer: Send this augmented prompt to the chosen Bedrock foundation model using the Bedrock Runtime API (invoke_model).
-Return Response: Provide the model's generated answer back to the user.
-Implementation Steps & Python Code Snippets (using Boto3 & PyMongo)
-
-1. Prerequisites:
-
-AWS Credentials: Configure your environment with AWS credentials (e.g., via IAM role, environment variables, ~/.aws/credentials). Ensure the identity has permissions for bedrock:InvokeModel and access to your DocumentDB cluster.
-DocumentDB Setup:
-Confirm your DocumentDB cluster is running version 5.0 or later and uses an instance type that supports vector search.
-Ensure your rag_vector_index is created correctly (specifying dimensions=1024, similarity metric like cosine or euclidean, and type like hnsw or ivfflat).
-Python Libraries: Install necessary libraries:
-Bash
-
-pip install boto3 pymongo
-2. Initialize Clients:
-
-Python
+# --------------------------------------------------------------------------
+# RAG System using AWS Bedrock and Amazon DocumentDB (with MongoDB compat.)
+# --------------------------------------------------------------------------
+# Prerequisites:
+# 1. Install libraries: pip install boto3 pymongo
+# 2. Configure AWS credentials (IAM role, environment variables, etc.)
+# 3. Download DocumentDB CA certificate (e.g., global-bundle.pem)
+# 4. Replace placeholder values in the Configuration section below.
+# 5. Ensure DocumentDB cluster is v5.0+ and supports vector search.
+# 6. Ensure the vector index 'rag_vector_index' (or your configured name)
+#    exists on the vector field in your collection.
+# --------------------------------------------------------------------------
 
 import boto3
 import pymongo
 import json
 import os
+import sys
 
 # --- Configuration ---
+# Replace these placeholders with your actual values or use environment variables
 BEDROCK_REGION = 'us-east-1' # Or your preferred Bedrock region
-DOCDB_USER = os.environ.get("DOCDB_USER", "your_user") # Use env vars or secrets management
-DOCDB_PASSWORD = os.environ.get("DOCDB_PASSWORD", "your_password")
+
+# Best practice: Use environment variables or AWS Secrets Manager for credentials
+DOCDB_USER = os.environ.get("DOCDB_USER", "your_docdb_user")
+DOCDB_PASSWORD = os.environ.get("DOCDB_PASSWORD", "your_docdb_password")
 DOCDB_ENDPOINT = os.environ.get("DOCDB_ENDPOINT", "your-docdb-cluster-endpoint:port") # e.g., mycluster.cluster-xxxx.us-east-1.docdb.amazonaws.com:27017
 DOCDB_DB_NAME = "your_database_name"
 DOCDB_COLLECTION_NAME = "your_collection_name"
-DOCDB_INDEX_NAME = "rag_vector_index"
-DOCDB_VECTOR_FIELD = "embedding" # The field in your documents storing the vector
-DOCDB_TEXT_FIELD = "text_chunk" # The field storing the original text chunk
-DOCDB_METADATA_FIELD = "metadata" # Optional: A field with source info, etc.
-EMBEDDING_MODEL_ID = "amazon.titan-embed-text-v1"
-# Choose your generation model - PAY ATTENTION TO API Differences below
-LLM_MODEL_ID = "anthropic.claude-3-sonnet-20240229-v1:0" # Example: Claude 3 Sonnet
-# LLM_MODEL_ID = "anthropic.claude-v2"                 # Example: Claude 2
+DOCDB_CA_CERT_PATH = "global-bundle.pem" # Path to your downloaded CA certificate
+
+# Vector Search Configuration
+DOCDB_INDEX_NAME = "rag_vector_index"      # Name of your vector index in DocumentDB
+DOCDB_VECTOR_FIELD = "embedding"           # Field in your documents storing the 1024-dim vector
+DOCDB_TEXT_FIELD = "text_chunk"            # Field storing the original text chunk corresponding to the vector
+DOCDB_METADATA_FIELD = "metadata"          # Optional: Field storing metadata (source, document_id, etc.)
+
+# Bedrock Model IDs
+EMBEDDING_MODEL_ID = "amazon.titan-embed-text-v1" # Embedding model used
+
+# --- Choose your LLM - PAY ATTENTION TO API DIFFERENCES IN get_llm_response ---
+# LLM_MODEL_ID = "anthropic.claude-3-sonnet-20240229-v1:0" # Example: Claude 3 Sonnet
+# LLM_MODEL_ID = "anthropic.claude-3-haiku-20240307-v1:0"  # Example: Claude 3 Haiku
+LLM_MODEL_ID = "anthropic.claude-v2"                 # Example: Claude 2
 # LLM_MODEL_ID = "amazon.titan-text-express-v1"       # Example: Titan Text Express
+# LLM_MODEL_ID = "ai21.j2-ultra-v1"                   # Example: AI21 Jurassic-2 Ultra (Check API format)
+# LLM_MODEL_ID = "cohere.command-text-v14"            # Example: Cohere Command (Check API format)
+
 # --- End Configuration ---
 
-# Initialize Bedrock Runtime client
-bedrock_runtime = boto3.client(
-    service_name='bedrock-runtime',
-    region_name=BEDROCK_REGION
-)
 
-# Initialize DocumentDB client
-# Make sure to download the required CA certificate (e.g., global-bundle.pem)
-# See: https://docs.aws.amazon.com/documentdb/latest/developerguide/connect-programmatically.html
-docdb_connection_string = (
-    f"mongodb://{DOCDB_USER}:{DOCDB_PASSWORD}@"
-    f"{DOCDB_ENDPOINT}/?tls=true&tlsCAFile=global-bundle.pem"
-    f"&replicaSet=rs0&readPreference=secondaryPreferred&retryWrites=false"
-)
+# --- Initialize AWS Bedrock Client ---
 try:
+    bedrock_runtime = boto3.client(
+        service_name='bedrock-runtime',
+        region_name=BEDROCK_REGION
+    )
+    print(f"Bedrock runtime client initialized successfully in region '{BEDROCK_REGION}'.")
+except Exception as e:
+    print(f"ERROR: Failed to initialize Bedrock client: {e}")
+    sys.exit(1) # Exit if Bedrock client fails
+
+# --- Initialize DocumentDB Client ---
+docdb_client = None # Initialize to None
+try:
+    if not os.path.exists(DOCDB_CA_CERT_PATH):
+         print(f"ERROR: DocumentDB CA certificate not found at '{DOCDB_CA_CERT_PATH}'.")
+         print("Please download it from AWS and place it in the correct path or update DOCDB_CA_CERT_PATH.")
+         sys.exit(1)
+
+    docdb_connection_string = (
+        f"mongodb://{DOCDB_USER}:{DOCDB_PASSWORD}@"
+        f"{DOCDB_ENDPOINT}/?tls=true&tlsCAFile={DOCDB_CA_CERT_PATH}"
+        f"&replicaSet=rs0&readPreference=secondaryPreferred&retryWrites=false"
+    )
+    print("Connecting to DocumentDB...")
     docdb_client = pymongo.MongoClient(docdb_connection_string)
     db = docdb_client[DOCDB_DB_NAME]
     collection = db[DOCDB_COLLECTION_NAME]
-    # Test connection
-    print("DocumentDB connection successful. Server info:", docdb_client.server_info())
+    # Test connection by getting server info
+    server_info = docdb_client.server_info()
+    print(f"DocumentDB connection successful. Server version: {server_info.get('version')}")
+    # Check if the specified collection exists (optional but good practice)
+    if DOCDB_COLLECTION_NAME not in db.list_collection_names():
+        print(f"Warning: Collection '{DOCDB_COLLECTION_NAME}' not found in database '{DOCDB_DB_NAME}'. Searches will likely fail.")
+
+except pymongo.errors.ConfigurationError as e:
+    print(f"ERROR: DocumentDB configuration error (check connection string, username, password, CA path): {e}")
+    sys.exit(1)
 except pymongo.errors.ConnectionFailure as e:
-    print(f"ERROR: Could not connect to DocumentDB: {e}")
-    # Handle error appropriately (exit, raise exception, etc.)
-    exit()
+    print(f"ERROR: Could not connect to DocumentDB at '{DOCDB_ENDPOINT}'. Check endpoint, network access, credentials, and TLS settings. Details: {e}")
+    sys.exit(1)
 except Exception as e:
-    print(f"An unexpected error occurred during DocumentDB connection: {e}")
-    exit()
+    print(f"ERROR: An unexpected error occurred during DocumentDB connection: {e}")
+    if docdb_client:
+        docdb_client.close()
+    sys.exit(1)
 
-3. Function to Generate Embeddings (Bedrock Titan):
 
-Python
-
+# --- Bedrock Embedding Function ---
 def generate_embedding(text_input):
     """Generates embedding for the given text using Bedrock Titan Text."""
+    if not text_input or not isinstance(text_input, str):
+        print("ERROR: Invalid input provided for embedding generation.")
+        return None
     try:
         payload = json.dumps({"inputText": text_input})
         response = bedrock_runtime.invoke_model(
@@ -307,86 +113,90 @@ def generate_embedding(text_input):
         )
         response_body = json.loads(response.get('body').read())
         embedding = response_body.get('embedding')
-        if not embedding:
-             print(f"ERROR: Could not extract embedding from Bedrock response: {response_body}")
+        if not embedding or not isinstance(embedding, list):
+             print(f"ERROR: Could not extract valid embedding from Bedrock response: {response_body}")
              return None
+        # Optional: Add check for expected dimension (1024)
+        # if len(embedding) != 1024:
+        #    print(f"Warning: Embedding dimension mismatch. Expected 1024, got {len(embedding)}")
         return embedding
     except Exception as e:
-        print(f"ERROR generating embedding: {e}")
+        # Catch specific Bedrock exceptions if needed, e.g., botocore.exceptions.ClientError
+        print(f"ERROR generating embedding using '{EMBEDDING_MODEL_ID}': {e}")
         return None
-4. Function for Vector Search (DocumentDB $vectorSearch):
 
-Python
 
+# --- DocumentDB Vector Search Function ---
 def search_documentdb(query_embedding, k=5):
     """Performs vector search in DocumentDB using $vectorSearch."""
-    if not query_embedding:
-        print("ERROR: No query embedding provided for search.")
+    if not query_embedding or not isinstance(query_embedding, list):
+        print("ERROR: Invalid or missing query embedding provided for search.")
         return []
 
-    # Ensure your index 'rag_vector_index' exists on the 'embedding' field
-    # with 1024 dimensions and the chosen similarity metric.
+    # Define the aggregation pipeline
     pipeline = [
         {
             '$vectorSearch': {
-                'index': DOCDB_INDEX_NAME,
-                'path': DOCDB_VECTOR_FIELD,
-                'queryVector': query_embedding,
-                'numCandidates': k * 15, # Number of candidates to consider (adjust based on performance/accuracy needs)
-                'limit': k                # Number of results to return
-                # Optional: Add metadata filters if needed
-                # 'filter': { 'metadata.source': 'some_specific_source' }
+                'index': DOCDB_INDEX_NAME,         # Your vector index name
+                'path': DOCDB_VECTOR_FIELD,        # Field containing the vectors
+                'queryVector': query_embedding,    # The vector generated from the user query
+                'numCandidates': k * 15,           # Number of candidates to consider (adjust as needed)
+                'limit': k                         # Number of top results to return
+                # 'filter': { 'metadata.category': 'some_category' } # Optional: Add metadata filters here
             }
         },
         {
-            '$project': { # Project only necessary fields
-                '_id': 0,
-                'text': f'${DOCDB_TEXT_FIELD}', # Retrieve the text chunk content
-                'metadata': f'${DOCDB_METADATA_FIELD}', # Retrieve metadata if available
-                'score': { '$meta': 'vectorSearchScore' } # Get the similarity score
+            '$project': {                          # Specify fields to return
+                '_id': 0,                          # Exclude the default _id field
+                'text': f'${DOCDB_TEXT_FIELD}',    # Retrieve the original text chunk
+                'metadata': f'${DOCDB_METADATA_FIELD}', # Retrieve metadata (if field exists)
+                'score': { '$meta': 'vectorSearchScore' } # Retrieve the similarity score
             }
         }
     ]
+
     try:
         results = list(collection.aggregate(pipeline))
         return results
     except pymongo.errors.OperationFailure as e:
-        # Check for common errors like index not found or operator not supported
+        # Provide more specific feedback for common errors
         if "index not found" in str(e):
-             print(f"ERROR: DocumentDB index '{DOCDB_INDEX_NAME}' not found on field '{DOCDB_VECTOR_FIELD}'. Details: {e}")
+             print(f"ERROR: DocumentDB index '{DOCDB_INDEX_NAME}' not found on field '{DOCDB_VECTOR_FIELD}'. Please create the index. Details: {e}")
         elif "$vectorSearch is not allowed" in str(e) or "Unrecognized pipeline stage name" in str(e):
-             print(f"ERROR: $vectorSearch may not be enabled or supported on your DocumentDB cluster version/instance type. Ensure you are on DocumentDB 5.0+ instance-based cluster. Details: {e}")
+             print(f"ERROR: $vectorSearch may not be enabled or supported. Ensure you are using DocumentDB 5.0+ instance-based cluster and the feature is active. Details: {e}")
+        elif "queryVector" in str(e) and "dimensionality does not match" in str(e):
+             print(f"ERROR: Query vector dimension ({len(query_embedding)}) does not match index dimension. Check embedding model and index definition. Details: {e}")
         else:
-            print(f"ERROR during DocumentDB vector search: {e}")
+            print(f"ERROR during DocumentDB vector search aggregation: {e}")
         return []
     except Exception as e:
         print(f"An unexpected error occurred during DocumentDB search: {e}")
         return []
-5. Function to Invoke LLM (Bedrock - Model Specific!)
 
-Python
 
-def get_llm_response(prompt, model_id):
+# --- Bedrock LLM Invocation Function ---
+def get_llm_response(prompt, model_id=LLM_MODEL_ID):
     """Gets response from the Bedrock LLM, handling different API formats."""
+    if not prompt or not isinstance(prompt, str):
+        print("ERROR: Invalid or missing prompt provided for LLM invocation.")
+        return None
+
     try:
         # --- CLAUDE 3.x / 3.5 (Messages API) ---
         if "anthropic.claude-3" in model_id:
-            # Note: System prompt is a top-level parameter for Claude 3+
-            # We are incorporating the instruction into the user message here for simplicity,
-            # but using the 'system' parameter is often preferred.
             messages = [{"role": "user", "content": prompt}]
             body = json.dumps({
                 "anthropic_version": "bedrock-2023-05-31", # Required for Messages API
-                "max_tokens": 1024,
+                "max_tokens": 1024,         # Max tokens to generate
                 "messages": messages,
-                "temperature": 0.1,
-                "top_p": 0.9,
+                "temperature": 0.1,         # Controls randomness (lower means more deterministic)
+                "top_p": 0.9,               # Controls diversity via nucleus sampling
+                # "system": "Optional system prompt here" # Use if needed
             })
-            response = bedrock_runtime.invoke_model(
-                body=body, modelId=model_id, accept="application/json", contentType="application/json"
-            )
+            accept = "application/json"
+            contentType = "application/json"
+            response = bedrock_runtime.invoke_model(body=body, modelId=model_id, accept=accept, contentType=contentType)
             response_body = json.loads(response.get("body").read())
-            # Extract text from the response structure
             if response_body.get("content") and isinstance(response_body["content"], list) and len(response_body["content"]) > 0:
                  return response_body["content"][0].get("text")
             else:
@@ -395,17 +205,17 @@ def get_llm_response(prompt, model_id):
 
         # --- CLAUDE 1.x / 2.x (Text Completion API) ---
         elif "anthropic.claude-v" in model_id:
-             # Format prompt for Claude 1/2 Text Completion
              formatted_prompt = f"\n\nHuman:{prompt}\n\nAssistant:"
              body = json.dumps({
                 "prompt": formatted_prompt,
-                "max_tokens_to_sample": 500,
+                "max_tokens_to_sample": 512, # Max tokens for Claude 1/2
                 "temperature": 0.1,
                 "top_p": 0.9,
+                # "stop_sequences": ["\n\nHuman:"] # Optional stop sequences
              })
-             response = bedrock_runtime.invoke_model(
-                body=body, modelId=model_id, accept="application/json", contentType="application/json"
-             )
+             accept = "application/json"
+             contentType = "application/json"
+             response = bedrock_runtime.invoke_model(body=body, modelId=model_id, accept=accept, contentType=contentType)
              response_body = json.loads(response.get('body').read())
              return response_body.get('completion')
 
@@ -420,110 +230,137 @@ def get_llm_response(prompt, model_id):
                      "topP": 0.9
                  }
              })
-             response = bedrock_runtime.invoke_model(
-                body=body, modelId=model_id, accept="application/json", contentType="application/json"
-             )
+             accept = "application/json"
+             contentType = "application/json"
+             response = bedrock_runtime.invoke_model(body=body, modelId=model_id, accept=accept, contentType=contentType)
              response_body = json.loads(response.get('body').read())
-             # Assuming standard response structure
              if response_body.get("results") and len(response_body["results"]) > 0:
                  return response_body["results"][0].get("outputText")
              else:
                   print(f"ERROR: Unexpected Titan Text response format: {response_body}")
                   return None
 
+        # --- Add other model families here (e.g., Cohere, AI21) ---
+        # elif "cohere.command" in model_id:
+        #     # Add Cohere specific invoke_model structure
+        #     print(f"ERROR: Cohere API handling not implemented yet for {model_id}")
+        #     return None
+        # elif "ai21.j2" in model_id:
+        #     # Add AI21 specific invoke_model structure
+        #     print(f"ERROR: AI21 API handling not implemented yet for {model_id}")
+        #     return None
+
         else:
-            print(f"ERROR: Unsupported LLM Model ID structure for specific API handling: {model_id}")
+            print(f"ERROR: Unsupported LLM Model ID or API structure not implemented: {model_id}")
             return None
 
     except Exception as e:
-        print(f"ERROR invoking LLM ({model_id}): {e}")
-        # Consider checking for specific boto3 exceptions like ModelNotReadyException, etc.
+        # Catch specific Bedrock exceptions if needed
+        # Example: botocore.exceptions.ClientError and check e.response['Error']['Code']
+        print(f"ERROR invoking LLM '{model_id}': {e}")
         return None
-Note: The LLM invocation part is crucial and model-dependent. Always check the latest AWS Bedrock documentation for the specific invoke_model request/response format for your chosen LLM_MODEL_ID. Some newer models might even require using an "Inference Profile ARN" instead of the base model ID in the invoke_model call.
 
-6. RAG Orchestration Function:
-
-Python
-
+# --- RAG Orchestration Function ---
 def perform_rag(user_query, top_k=3):
     """Executes the full RAG pipeline."""
+    if not user_query or not isinstance(user_query, str):
+        print("ERROR: Invalid user query provided.")
+        return "Error: Please provide a valid question."
+
     print(f"\n--- Starting RAG for Query: '{user_query}' ---")
 
     # 1. Generate Query Embedding
-    print("1. Generating query embedding...")
+    print(f"1. Generating query embedding using '{EMBEDDING_MODEL_ID}'...")
     query_embedding = generate_embedding(user_query)
     if not query_embedding:
-        return "Error: Failed to generate query embedding."
-    print("   Embedding generated.")
+        return "Error: Failed to generate query embedding. Cannot proceed with search."
+    print(f"   Embedding generated (dimension: {len(query_embedding)}).")
 
     # 2. Perform Vector Search
-    print(f"2. Searching DocumentDB (top {top_k})...")
+    print(f"2. Searching DocumentDB index '{DOCDB_INDEX_NAME}' (top {top_k})...")
     search_results = search_documentdb(query_embedding, k=top_k)
-    if not search_results:
-        print("   No relevant documents found or error during search. Attempting generation without DB context.")
-        context = "No relevant context found in the database."
-    else:
-        print(f"   Retrieved {len(search_results)} relevant document(s).")
-        # Optional: Print scores for debugging
-        # for res in search_results:
-        #    print(f"      Score: {res.get('score'):.4f}, Metadata: {res.get('metadata')}")
 
     # 3. Prepare Context
     print("3. Preparing context...")
-    if search_results:
-        context = "\n\n".join([result.get('text', '') for result in search_results])
-        print(f"   Context prepared (length: {len(context)} chars).")
-        # print(f"   Context Snippet:\n{context[:500]}...") # Uncomment for debugging
+    context = ""
+    if not search_results:
+        print("   No relevant documents found in DocumentDB or search failed.")
+        context = "No relevant context found in the database." # Provide specific info to LLM
     else:
-        print("   Using default 'no context' message.")
+        print(f"   Retrieved {len(search_results)} relevant document(s):")
+        context_pieces = []
+        for i, res in enumerate(search_results):
+            text_content = res.get('text', '[No text content found]')
+            score = res.get('score', -1.0) # Default score if missing
+            metadata_info = res.get('metadata', '{}') # Default empty metadata
+            print(f"      Result {i+1}: Score={score:.4f}, Metadata={metadata_info}, Text Snippet='{text_content[:100]}...'")
+            context_pieces.append(text_content)
+        context = "\n\n".join(context_pieces)
+        print(f"   Context prepared (total length: {len(context)} chars).")
 
-
-    # 4. Construct Prompt
-    print("4. Constructing prompt...")
-    # Adapt this prompt structure based on LLM and desired behavior
-    prompt = f"""You are a helpful AI assistant. Answer the following question based *only* on the provided context. If the context does not contain the answer, state that you cannot answer based on the available information.
+    # 4. Construct Prompt for the LLM
+    print("4. Constructing prompt for LLM...")
+    # This prompt template works reasonably well, but customize it for your specific needs and LLM.
+    prompt = f"""You are an AI assistant. Your task is to answer the user's question based *only* on the following context provided.
+Do not use any prior knowledge.
+If the context does not contain enough information to answer the question, state clearly that you cannot answer based on the provided context.
+Be concise and directly address the question.
 
 Context:
----
+--- START CONTEXT ---
 {context}
----
+--- END CONTEXT ---
 
 Question: {user_query}
 
 Answer:"""
     print("   Prompt constructed.")
-    # print(f"   Prompt Snippet:\n{prompt[:500]}...") # Uncomment for debugging
+    # print(f"   Prompt Snippet:\n{prompt[:500]}...") # Uncomment for debugging prompt
 
     # 5. Get LLM Response
-    print(f"5. Getting response from LLM ({LLM_MODEL_ID})...")
+    print(f"5. Sending prompt to LLM '{LLM_MODEL_ID}'...")
     final_answer = get_llm_response(prompt, LLM_MODEL_ID)
     print("   LLM response received.")
 
-    # 6. Clean up and return
+    # 6. Format and Return Result
     print("--- RAG complete ---")
     if final_answer:
         return final_answer.strip()
     else:
-        return "Error: Failed to get response from the language model."
+        # Provide a more informative error if LLM failed
+        if not search_results:
+             return "Could not find relevant information in the database and failed to generate a fallback response."
+        else:
+             return "Found relevant information, but encountered an error generating the final answer."
 
-# --- Example Usage ---
+
+# --- Main Execution Block ---
 if __name__ == "__main__":
-    query = "Describe the main features of vector search in DocumentDB." # Example query
-    response = perform_rag(query, top_k=3)
-    print("\n====================\nFinal Answer:\n====================\n", response)
+    # Example usage:
+    # Replace this with your actual user query input mechanism
+    # example_query = "What are the benefits of using vector search?"
+    # example_query = "Summarize the document about project Alpha."
+    example_query = "What did the analysis reveal about market trends?"
 
-    # Clean up the DocumentDB connection when done
-    if 'docdb_client' in locals() and docdb_client:
-        docdb_client.close()
-        print("\nDocumentDB connection closed.")
-Key Considerations & Next Steps:
+    if len(sys.argv) > 1:
+        # Allow passing query as a command-line argument
+        example_query = " ".join(sys.argv[1:])
 
-Configuration: Move sensitive details (credentials, endpoints) to environment variables or a proper secrets management solution instead of hardcoding.
-Error Handling: Add more specific error handling (e.g., for Bedrock ModelNotReadyException, AccessDeniedException).
-LLM Choice & Prompting: Experiment with different Bedrock LLMs (LLM_MODEL_ID) and refine the prompt structure for optimal results. The quality of the prompt is critical.
-Context Length: Be mindful of the chosen LLM's maximum context window size. If retrieved context is too long, you might need to truncate it or use more sophisticated context management techniques.
-Chunking: The way your original documents were split into chunks (stored in DOCDB_TEXT_FIELD) heavily influences retrieval quality. Ensure chunks are meaningful and not too large or small.
-Performance: Monitor the latency of embedding generation, DocumentDB search, and LLM inference. Optimize numCandidates in the vector search. Consider Provisioned Throughput in Bedrock for consistent LLM performance if needed.
-DocumentDB Index Tuning: Experiment with HNSW parameters (M, efConstruction, efSearch in $vectorSearch) if using HNSW, or probes if using IVFFlat, to balance speed and recall.
-LangChain/LlamaIndex: Consider using frameworks like LangChain or LlamaIndex, which provide abstractions for RAG pipelines and integrations with Bedrock and vector stores, potentially simplifying development (though adding a dependency). The AWS sample rag-with-amazon-bedrock-and-documentdb on GitHub is also a valuable reference.
-This comprehensive guide should equip you to build your RAG system effectively using DocumentDB and Bedrock. Remember to test thoroughly and iterate on your configuration and prompts.
+    print(f"\nProcessing query: '{example_query}'")
+    print("=======================================")
+
+    # Perform the RAG operation
+    response = perform_rag(example_query, top_k=3) # Adjust top_k as needed
+
+    print("\n=======================================")
+    print("Final Answer:")
+    print("=======================================")
+    print(response)
+
+    # Clean up the DocumentDB connection
+    if docdb_client:
+        try:
+            docdb_client.close()
+            print("\nDocumentDB connection closed.")
+        except Exception as e:
+            print(f"Error closing DocumentDB connection: {e}")
