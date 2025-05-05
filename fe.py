@@ -1,8 +1,7 @@
-# app.py
+# Updated Streamlit code that works with your current implementation
 import streamlit as st
-from your_rag_module import perform_rag, generate_embedding, search_documentdb  # Import your existing functions
-import json
-import os
+from your_rag_module import perform_rag  # Import your existing function
+import datetime
 
 # Custom CSS styling
 st.set_page_config(
@@ -27,9 +26,6 @@ inject_custom_css()
 if 'conversation_history' not in st.session_state:
     st.session_state.conversation_history = []
 
-if 'search_results' not in st.session_state:
-    st.session_state.search_results = []
-
 # Sidebar configuration
 with st.sidebar:
     st.title("Configuration ⚙️")
@@ -39,7 +35,6 @@ with st.sidebar:
     
     if st.button("Clear History 🗑️"):
         st.session_state.conversation_history = []
-        st.session_state.search_results = []
         st.experimental_rerun()
 
 # Main interface
@@ -64,7 +59,6 @@ if user_query:
             }
             
             st.session_state.conversation_history.append(history_entry)
-            st.session_state.search_results = response.get('metadata', {}).get('search_results', [])
 
         except Exception as e:
             st.error(f"Error processing query: {str(e)}")
@@ -77,34 +71,7 @@ if st.session_state.conversation_history:
     latest = st.session_state.conversation_history[-1]
     with st.container():
         st.markdown(f"**Question:** {latest['query']}")
-        st.markdown(f"**Answer:** {latest['response'].get('answer', 'No answer generated')}")
-        
-        if show_debug:
-            with st.expander("Technical Details 🔍"):
-                st.json(latest['response'].get('metadata', {}))
-
-# Display search results
-if st.session_state.search_results:
-    st.markdown("---")
-    st.markdown("### Retrieved Documents")
-    
-    for idx, result in enumerate(st.session_state.search_results):
-        with st.container():
-            st.markdown(f"**Document {idx+1}** (Score: {result.get('score', 0):.2f})")
-            st.caption(f"Source: {result.get('source', 'Unknown')}")
-            st.markdown(f"```\n{result.get('text', '')}\n```")
-
-# Display conversation history
-if st.session_state.conversation_history:
-    st.markdown("---")
-    st.markdown("### Conversation History")
-    
-    for conv in reversed(st.session_state.conversation_history):
-        with st.container():
-            st.markdown(f"**{conv['timestamp']}**")
-            st.markdown(f"**Q:** {conv['query']}")
-            st.markdown(f"**A:** {conv['response'].get('answer', '')}")
-            st.markdown("---")
+        st.markdown(f"**Answer:** {latest['response']}")  # Directly access string response
 
 # Instructions to run
 # pip install streamlit
