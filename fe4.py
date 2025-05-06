@@ -145,3 +145,35 @@ if st.session_state.conversation_history:
             st.markdown(f"""
             <div class="chat-message user-message">
                 <div style="display: flex; justify-content: space-between; margin-bottom: 8px;">
+                    <strong>👤 You</strong>
+                    <small style="color: #666;">{msg['timestamp']}</small>
+                </div>
+                <div>{msg['content']}</div>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        elif msg["role"] == "assistant":
+            st.markdown(f"""
+            <div class="chat-message assistant-message">
+                <div style="display: flex; justify-content: space-between; margin-bottom: 8px;">
+                    <strong>🤖 Assistant</strong>
+                    <small style="color: #666;">{msg['timestamp']}</small>
+                </div>
+                <div>{msg['content']}</div>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        elif msg["role"] == "error":
+            st.error(f"""
+            <div style="padding: 1rem;">
+                ⚠️ {msg['content']}<br><small>{msg['timestamp']}</small>
+            </div>
+            """, unsafe_allow_html=True)
+
+else:
+    st.markdown("""
+    <div style="text-align: center; margin-top: 3rem; color: #666;">
+        <h3>🚀 Get Started</h3>
+        <p>Ask a question about your documents to begin!</p>
+    </div>
+    """, unsafe_allow_html=True)
