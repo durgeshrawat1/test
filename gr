@@ -1,0 +1,35 @@
+import boto3
+import json
+
+bedrock = boto3.client('bedrock-runtime', region_name='us-east-1')
+
+prompt = """
+You are a helpful assistant.
+Here is some information about my account:
+  - There are 10,543 objects in an S3 bucket.
+  - There are no active EC2 instances.
+Based on the above, answer the following question:
+
+<amazon-bedrock-guardrails-guardContent_xyz>
+How many objects do I have in my S3 bucket? 
+</amazon-bedrock-guardrails-guardContent_xyz>
+
+Here are other user queries:
+<amazon-bedrock-guardrails-guardContent_xyz>
+How do I download files from my S3 bucket?
+</amazon-bedrock-guardrails-guardContent_xyz>
+"""
+
+response = bedrock.invoke_model(
+    modelId='anthropic.claude-3-sonnet-20240229-v1:0',
+    contentType='application/json',
+    accept='application/json',
+    body=json.dumps({
+        "prompt": prompt,
+        "max_tokens": 512,
+        "temperature": 0.7,
+        "anthropic_version": "bedrock-2023-05-31"
+    })
+)
+
+print(response['body'].read().decode())
