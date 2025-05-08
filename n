@@ -1,0 +1,70 @@
+import boto3
+import json
+
+# Initialize the Bedrock runtime client
+bedrock_runtime = boto3.client('bedrock-runtime', region_name='your-aws-region')  # Replace with your AWS region
+
+# --- Configuration ---
+model_id = 'your-model-id'  # Replace with your model ID
+guardrail_identifier = 'arn:aws:bedrock:your-aws-region:your-account-id:guardrail/your-guardrail-id'  # Replace with your Guardrail ARN
+guardrail_version = '1'  # Replace with your Guardrail version
+
+# Define the request body
+request_body_dict = {
+    "anthropic_version": "bedrock-2023-05-31",  # Common for Claude models
+    "max_tokens": 1000,
+    "messages": [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "What is the capital of France?"
+                },
+                {
+                    "guardContent": {
+                        "text": {
+                            "text": "Paris is the capital of France."
+                        }
+                    }
+                }
+            ]
+        }
+    ]
+}
+
+# Convert the dictionary to a JSON string
+body_json = json.dumps(request_body_dict)
+
+try:
+    print(f"Invoking model {model_id} with Guardrail {guardrail_identifier} version {guardrail_version}...")
+
+    # Send the request to invoke the model
+    response = bedrock_runtime.invoke_model(
+        modelId=model_id,
+        guardrailIdentifier=guardrail_identifier,
+        guardrailVersion=guardrail_version,
+        trace='ENABLED',  # Enable trace for detailed Guardrail processing information
+        body=body_json,
+        accept='application/json',
+        contentType='application/json'
+    )
+
+    # Process the response
+    response_body = json.loads(response['body'].read())
+    print("\n--- Model Response ---")
+    print(json.dumps(response_body, indent=2))
+
+    # If there is guardrail trace information, print it
+    if 'amazon-bedrock-trace' in response:
+        guardrail_trace = response.get('amazon-bedrock-trace')
+        print("\n--- Guardrail Trace (from headers if available) ---")
+        print(guardrail_trace)
+
+except bedrock_runtime.exceptions.ValidationException as ve:
+    print(f"\n--- Guardrail Intervention (ValidationException) ---")
+    print(f"Error: {ve}")
+    # Often, the ValidationException for a Guardrail block will contain trace details or specific information about what was blocked in its message or fields.
+except Exception as e:
+    print(f"\n--- An error occurred ---")
+    print(e)
