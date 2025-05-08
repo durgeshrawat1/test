@@ -1,38 +1,91 @@
 import boto3
 import json
 
-bedrock = boto3.client("bedrock-runtime", region_name="us-east-1")
+# Initialize the Bedrock runtime client
+# Ensure your AWS credentials and region are configured (e.g., via environment variables or AWS CLI config)
+bedrock_runtime = boto3.client('bedrock-runtime', region_name='your-aws-region') # e.g., us-east-1
 
-prompt = """
-\n\nHuman: You are a helpful assistant.
+# --- Configuration ---
+model_id = 'anthropic.claude-3-sonnet-20240229-v1:0' # REPLACE with your correct Sonnet 3.7 model ID
+guardrail_identifier = 'arn:aws:bedrock:your-aws-region:your-account-id:guardrail/your-guardrail-id' # REPLACE with your Guardrail ARN
+guardrail_version = '1' # REPLACE with your Guardrail version
+
+# The JSON body as provided in your question
+# Note: Python's json.dumps will correctly handle escaping characters in the multi-line string.
+# The prompt text contains the special Guardrail tags.
+request_body_dict = {
+    "anthropic_version": "bedrock-2023-05-31", # Common for Claude models
+    "max_tokens": 1000,
+    "messages": [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": """
+You are a helpful assistant.
 Here is some information about my account:
-  - There are 10,543 objects in an S3 bucket.
-  - There are no active EC2 instances.
-
+    - There are 10,543 objects in an S3 bucket.
+    - There are no active EC2 instances.
 Based on the above, answer the following question:
-
+Question: 
 <amazon-bedrock-guardrails-guardContent_xyz>
-How many objects do I have in my S3 bucket?
+How many objects do I have in my S3 bucket? 
 </amazon-bedrock-guardrails-guardContent_xyz>
-
+    ...
 Here are other user queries:
 <amazon-bedrock-guardrails-guardContent_xyz>
 How do I download files from my S3 bucket?
-</amazon-bedrock-guardrails-guardContent_xyz>
+</amazon-bedrock-guardrails-guardContent_xyz>    
+                    """
+                }
+            ]
+        }
+    ],
+    "amazon-bedrock-guardrailConfig": { # This is the key for Bedrock to parse the tags
+        "tagSuffix": "xyz"
+    }
+}
 
-\n\nAssistant:
-"""
+# Convert the dictionary to a JSON string
+body_json = json.dumps(request_body_dict)
 
-response = bedrock.invoke_model(
-    modelId="anthropic.claude-3-sonnet-20240229-v1:0",
-    contentType="application/json",
-    accept="application/json",
-    body=json.dumps({
-        "prompt": prompt,
-        "max_tokens": 512,
-        "temperature": 0.7,
-        "anthropic_version": "bedrock-2023-05-31"
-    })
-)
+try:
+    print(f"Invoking model {model_id} with Guardrail {guardrail_identifier} version {guardrail_version}...")
+    print(f"Request Body ( بخشی از ):\n{json.dumps(request_body_dict, indent=2)[:1000]}...") # Print a snippet
 
-print(response["body"].read().decode())
+    response = bedrock_runtime.invoke_model(
+        modelId=model_id,
+        guardrailIdentifier=guardrail_identifier,
+        guardrailVersion=guardrail_version,
+        trace='ENABLED',  # Enable trace for detailed Guardrail processing information
+        body=body_json,
+        accept='application/json',
+        contentType='application/json'
+    )
+
+    # Process the response
+    response_body = json.loads(response['body'].read())
+    print("\n--- Model Response ---")
+    print(json.dumps(response_body, indent=2))
+
+    # Check for Guardrail trace information in the response headers or body,
+    # specific to how Bedrock returns it with InvokeModel for your model type.
+    # For InvokeModel, Guardrail trace is often in x-amzn-bedrock-guardrail-trace header
+    # or within the response body if the request is blocked.
+    if 'amazon-bedrock-trace' in response: # Actual header name might vary, check Bedrock docs
+         guardrail_trace = response.get('amazon-bedrock-trace') # Or the correct header key
+         print("\n--- Guardrail Trace (from headers if available) ---")
+         print(guardrail_trace)
+
+
+except bedrock_runtime.exceptions.ValidationException as ve:
+    print(f"\n--- Guardrail Intervention (ValidationException) ---")
+    print(f"Error: {ve}")
+    # Often, the ValidationException for a Guardrail block will contain trace details
+    # or specific information about what was blocked in its message or fields.
+    # Example: error_message = ve.response.get('Error', {}).get('Message', '')
+
+except Exception as e:
+    print(f"\n--- An error occurred ---")
+    print(e)
