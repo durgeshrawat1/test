@@ -1,0 +1,65 @@
+import boto3
+import json
+
+bedrock_runtime = boto3.client('bedrock-runtime', region_name='us-east-1')
+
+model_id = 'anthropic.claude-3-sonnet-20240229-v1:0'
+guardrail_identifier = 'arn:aws:bedrock:us-east-1:your-account-id:guardrail/your-guardrail-id'
+guardrail_version = 'DRAFT'
+
+# Correctly structured content blocks with guard_content type
+request_body_dict = {
+    "anthropic_version": "bedrock-2023-05-31",
+    "max_tokens": 1000,
+    "messages": [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": """You are a helpful assistant.
+Here is some information about my account:
+- There are 10,543 objects in an S3 bucket.
+- There are no active EC2 instances.
+Based on the above, answer the following question:"""
+                },
+                {  # Guarded content block 1
+                    "type": "guard_content",
+                    "tag": "xyz",
+                    "content": "How many objects do I have in my S3 bucket?"
+                },
+                {
+                    "type": "text",
+                    "text": "Here are other user queries:"
+                },
+                {  # Guarded content block 2
+                    "type": "guard_content",
+                    "tag": "xyz",
+                    "content": "How do I download files from my S3 bucket?"
+                }
+            ]
+        }
+    ],
+    "amazon-bedrock-guardrailConfig": {
+        "tagSuffix": "xyz"  # Must match the tag in guard_content blocks
+    }
+}
+
+body_json = json.dumps(request_body_dict)
+
+try:
+    response = bedrock_runtime.invoke_model(
+        modelId=model_id,
+        guardrailIdentifier=guardrail_identifier,
+        guardrailVersion=guardrail_version,
+        trace='ENABLED',
+        body=body_json,
+        accept='application/json',
+        contentType='application/json'
+    )
+
+    response_body = json.loads(response['body'].read())
+    print(json.dumps(response_body, indent=2))
+
+except Exception as e:
+    print(f"Error: {e}")
