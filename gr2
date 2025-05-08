@@ -1,0 +1,81 @@
+import boto3
+import json
+
+# Initialize the Bedrock runtime client
+bedrock_runtime = boto3.client('bedrock-runtime', region_name='us-east-1')  # Ensure region matches your guardrail and model
+
+# --- Configuration ---
+model_id = 'anthropic.claude-3-sonnet-20240229-v1:0'  # Replace with your correct Sonnet 3.7 model ID
+guardrail_identifier = 'arn:aws:bedrock:us-east-1:your-account-id:guardrail/your-guardrail-id'  # Replace with your Guardrail ARN
+guardrail_version = 'DRAFT'  # Use 'DRAFT' or the specific version of your Guardrail
+
+# Construct the request body with proper formatting
+request_body_dict = {
+    "anthropic_version": "bedrock-2023-05-31",  # Common for Claude models
+    "max_tokens": 1000,
+    "messages": [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": """
+You are a helpful assistant.
+Here is some information about my account:
+    - There are 10,543 objects in an S3 bucket.
+    - There are no active EC2 instances.
+Based on the above, answer the following question:
+Question: 
+<amazon-bedrock-guardrails-guardContent_xyz>
+How many objects do I have in my S3 bucket? 
+</amazon-bedrock-guardrails-guardContent_xyz>
+    ...
+Here are other user queries:
+<amazon-bedrock-guardrails-guardContent_xyz>
+How do I download files from my S3 bucket?
+</amazon-bedrock-guardrails-guardContent_xyz>    
+                    """
+                }
+            ]
+        }
+    ],
+    "amazon-bedrock-guardrailConfig": {
+        "tagSuffix": "xyz"
+    }
+}
+
+# Convert the dictionary to a JSON string
+body_json = json.dumps(request_body_dict)
+
+try:
+    print(f"Invoking model {model_id} with Guardrail {guardrail_identifier} version {guardrail_version}...")
+    print(f"Request Body (partial):\n{json.dumps(request_body_dict, indent=2)[:1000]}...")  # Print a snippet
+
+    response = bedrock_runtime.invoke_model(
+        modelId=model_id,
+        guardrailIdentifier=guardrail_identifier,
+        guardrailVersion=guardrail_version,
+        trace='ENABLED',  # Enable trace for detailed Guardrail processing information
+        body=body_json,
+        accept='application/json',
+        contentType='application/json'
+    )
+
+    # Process the response
+    response_body = json.loads(response['body'].read())
+    print("\n--- Model Response ---")
+    print(json.dumps(response_body, indent=2))
+
+    # Check for Guardrail trace information in the response headers or body
+    if 'amazon-bedrock-trace' in response:
+        guardrail_trace = response.get('amazon-bedrock-trace')
+        print("\n--- Guardrail Trace (from headers if available) ---")
+        print(guardrail_trace)
+
+except bedrock_runtime.exceptions.ValidationException as ve:
+    print(f"\n--- Guardrail Intervention (ValidationException) ---")
+    print(f"Error: {ve}")
+
+except Exception as e:
+    print(f"\n--- An error occurred ---")
+    print(e)
