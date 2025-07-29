@@ -1,0 +1,20 @@
+resource "null_resource" "pip_install" {
+  count = length(local.lambda_functions)
+
+  provisioner "local-exec" {
+    command = <<EOT
+      mkdir -p lambda/${local.lambda_functions[count.index]}/build && \
+      rm -rf lambda/${local.lambda_functions[count.index]}/build/* && \
+      if [ -f lambda/${local.lambda_functions[count.index]}/requirements.txt ]; then \
+        pip install -r lambda/${local.lambda_functions[count.index]}/requirements.txt -t lambda/${local.lambda_functions[count.index]}/build || echo "pip install failed"; \
+      fi && \
+      if [ -f lambda/${local.lambda_functions[count.index]}/index.py ]; then \
+        cp lambda/${local.lambda_functions[count.index]}/index.py lambda/${local.lambda_functions[count.index]}/build/ || echo "copy failed"; \
+      fi
+    EOT
+  }
+
+  triggers = {
+    always_run = timestamp()
+  }
+}
