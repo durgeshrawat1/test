@@ -1,0 +1,88 @@
+terraform {
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+    archive = {
+      source  = "hashicorp/archive"
+      version = "~> 2.2"
+    }
+  }
+}
+
+provider "aws" {
+  region = "us-east-1"
+}
+
+# IAM role for Lambda
+resource "aws_iam_role" "lambda_exec" {
+  name = "lambda_exec_role"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [{
+      Effect = "Allow",
+      Principal = { Service = "lambda.amazonaws.com" },
+      Action = "sts:AssumeRole"
+    }]
+  })
+}
+
+locals {
+  lambda_functions = [
+    {
+      name         = "save_reporting_data"
+      folder       = "save_reporting_data"
+      handler      = "index.lambda_handler"
+      needs_layer  = true
+    },
+    {
+      name         = "other_lambda"
+      folder       = "other_lambda"
+      handler      = "index.handler"
+      needs_layer  = false
+    }
+  ]
+}
+
+# Build the shared Lambda layer zip
+data "archive_file" "lambda_layer" {
+  type        = "zip"
+  output_path = "${path.module}/build_artifacts/idp_commons_layer.zip"
+  source_dir  = "${path.module}/lib/idp_common_pkg"
+}
+
+resource "aws_lambda_layer_version" "idp_commons_layer" {
+  layer_name          = "idp_commons_layer"
+  compatible_runtimes = ["python3.9"]
+  filename            = data.archive_file.lambda_layer.output_path
+  source_code_hash    = data.archive_file.lambda_layer.output_base64sha256
+}
+
+# Package each Lambda using archive_file
+data "archive_file" "lambda_zips" {
+  count       = length(local.lambda_functions)
+  type        = "zip"
+  source_dir  = "${path.module}/lambdas/${local.lambda_functions[count.index].folder}"
+  output_path = "${path.module}/build_artifacts/${local.lambda_functions[count.index].name}.zip"
+}
+
+# Deploy all Lambda functions
+resource "aws_lambda_function" "lambda_functions" {
+  count = length(local.lambda_functions)
+
+  function_name = local.lambda_functions[count.index].name
+  handler       = local.lambda_functions[count.index].handler
+  runtime       = "python3.9"
+  role          = aws_iam_role.lambda_exec.arn
+
+  filename         = data.archive_file.lambda_zips[count.index].output_path
+  source_code_hash = data.archive_file.lambda_zips[count.index].output_base64sha256
+
+  layers = local.lambda_functions[count.index].needs_layer ? [
+    aws_lambda_layer_version.idp_commons_layer.arn
+  ] : []
+
+  timeout     = 60
+  memory_size = 1024
+}
