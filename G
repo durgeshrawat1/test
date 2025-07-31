@@ -1,0 +1,20 @@
+resource "null_resource" "build_lambda_layer" {
+  provisioner "local-exec" {
+    command = <<EOT
+      mkdir -p ${path.module}/build_artifacts
+      cd ${path.module}/lib/idp_common_pkg && \
+      zip -r ${path.module}/build_artifacts/idp_commons_layer.zip idp_commons > /dev/null
+    EOT
+  }
+}
+
+
+resource "null_resource" "build_lambda_layer" {
+  provisioner "local-exec" {
+    command = <<EOT
+      mkdir -p ${path.module}/build_artifacts
+      cd ${path.module}/lib/idp_common_pkg && \
+      zip -r ${path.module}/build_artifacts/idp_commons_layer.zip idp_commons > /dev/null
+    EOT
+  }
+}
