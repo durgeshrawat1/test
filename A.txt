@@ -1,0 +1,81 @@
+terraform {
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 4.0"
+    }
+  }
+  required_version = ">= 1.1"
+}
+
+provider "aws" {
+  region = "us-east-1" # change as needed
+}
+
+# 1. Build the Lambda Layer ZIP
+resource "null_resource" "build_layer" {
+  provisioner "local-exec" {
+    command = <<EOT
+      rm -rf ${path.module}/layer_build
+      mkdir -p ${path.module}/layer_build/python
+      cp -r ${path.module}/lib/idp_common_pkg/idp_commons ${path.module}/layer_build/python/
+      cd ${path.module}/layer_build && zip -r ../idp_commons_layer.zip .
+    EOT
+  }
+}
+
+# 2. Create Lambda Layer Version
+resource "aws_lambda_layer_version" "idp_commons_layer" {
+  depends_on          = [null_resource.build_layer]
+  layer_name          = "idp_commons_layer"
+  compatible_runtimes = ["python3.9"]
+  filename            = "${path.module}/idp_commons_layer.zip"
+  source_code_hash    = filebase64sha256("${path.module}/idp_commons_layer.zip")
+}
+
+# 3. Build Lambda function ZIP (exclude idp_commons)
+resource "null_resource" "build_lambda" {
+  provisioner "local-exec" {
+    command = <<EOT
+      rm -rf ${path.module}/lambda_build
+      mkdir -p ${path.module}/lambda_build
+      cp -r ${path.module}/lambdas/save_reporting_data/* ${path.module}/lambda_build/
+      cd ${path.module}/lambda_build && zip -r ../save_reporting_data.zip .
+    EOT
+  }
+}
+
+# 4. Deploy Lambda Function with Layer
+resource "aws_lambda_function" "save_reporting_data" {
+  depends_on = [null_resource.build_lambda]
+
+  function_name = "save_reporting_data"
+  handler       = "index.lambda_handler"
+  runtime       = "python3.9"
+  role          = aws_iam_role.lambda_exec.arn
+  filename      = "${path.module}/save_reporting_data.zip"
+  source_code_hash = filebase64sha256("${path.module}/save_reporting_data.zip")
+
+  layers       = [aws_lambda_layer_version.idp_commons_layer.arn]
+  timeout      = 60
+  memory_size  = 1024
+}
+
+# 5. IAM Role for Lambda Execution
+resource "aws_iam_role" "lambda_exec" {
+  name = "lambda_exec_role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [{
+      Effect    = "Allow",
+      Principal = { Service = "lambda.amazonaws.com" },
+      Action    = "sts:AssumeRole"
+    }]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "basic_execution" {
+  role       = aws_iam_role.lambda_exec.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+}
