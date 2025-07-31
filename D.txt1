@@ -1,0 +1,13 @@
+resource "null_resource" "package_layer" {
+  provisioner "local-exec" {
+    command = <<EOT
+set -e
+echo "Module path: ${path.module}"
+mkdir -p ${path.module}/build_artifacts
+cd ${path.module}/lib/idp_common_pkg
+ls -la
+zip -r ${path.module}/build_artifacts/idp_commons_layer.zip idp_commons
+EOT
+    interpreter = ["/bin/sh", "-c"]
+  }
+}
