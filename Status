@@ -1,0 +1,13 @@
+wanted to share a quick update on the work completed so far for the Accelerated Intelligent Document Processing on AWS solution (GitHub link).
+
+Work Completed:
+	1.	Terraform Conversion:
+The entire codebase has been successfully converted to Terraform for easier integration with our infrastructure-as-code practices.
+	2.	Compliance Review:
+Since certain AWS services like Serverless EMR are not approved in our organization, I reviewed the architecture and removed all unsupported resources from the codebase.
+	3.	Enablement of Approved Services:
+For services that are approved but not yet enabled in our environment, I worked on enabling them in the lab setup as part of the preparation.
+	4.	Deployment:
+I’ve completed the deployment for Pattern 1 of the solution. However, testing could not be performed due to the use of AWS AppSync, which is not currently approved in our organization.
+
+Please let me know if you’d like a walkthrough of the Terraform implementation or if we should explore alternatives to AppSync for testing and production readiness.
