@@ -27,3 +27,51 @@ Deployed the solution for Pattern 1. However, AppSync, which is a dependency in 
 	•	We are currently cleaning up and restructuring the Lambda code to properly define and install dependencies.
 	•	A few Lambda functions exceeded the size limit due to large dependencies; for those, we are creating and integrating Lambda layers to manage package size constraints.
 
+# -------- Boto3: Invoke Model --------
+import boto3
+import json
+
+# Use assumed role credentials here if needed
+bedrock_runtime = boto3.client('bedrock-runtime', region_name='us-east-1')
+
+invoke_response = bedrock_runtime.invoke_model(
+    modelId='anthropic.claude-v2',
+    contentType='application/json',
+    accept='application/json',
+    body=json.dumps({
+        "prompt": "\n\nHuman: What is the capital of France?\n\nAssistant:",
+        "max_tokens_to_sample": 100,
+        "temperature": 0.7
+    })
+)
+
+print("InvokeModel response:")
+print(invoke_response['body'].read().decode())
+
+# -------- Boto3: List Guardrails --------
+bedrock_control = boto3.client('bedrock', region_name='us-east-1')
+
+list_response = bedrock_control.list_guardrails()
+print("ListGuardrails response:")
+print(list_response['guardrails'])
+
+# -------- Boto3: Get Guardrail --------
+get_response = bedrock_control.get_guardrail(guardrailIdentifier='your-guardrail-id')
+print("GetGuardrail response:")
+print(get_response)
+
+# -------- LangChain: Invoke Bedrock Model --------
+from langchain_community.llms import Bedrock
+
+llm = Bedrock(
+    region_name="us-east-1",
+    model_id="anthropic.claude-v2",
+    model_kwargs={
+        "temperature": 0.5,
+        "max_tokens_to_sample": 100
+    }
+)
+
+langchain_response = llm.invoke("What is the capital of France?")
+print("LangChain response:")
+print(langchain_response)
