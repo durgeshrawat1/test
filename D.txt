@@ -18,3 +18,22 @@ resource "aws_lambda_layer_version" "idp_commons_layer" {
 
   depends_on = [null_resource.build_lambda_layer]
 }
+
+
+include:
+  - template: Terraform.gitlab-ci.yml  # Use your standard template
+
+default:
+  before_script:
+    - echo "Running Lambda layer packaging..."
+    - mkdir -p lib/idp_common_pkg
+    - mkdir -p build_artifacts
+    - cd lib/idp_common_pkg
+    - zip -r ../../build_artifacts/idp_commons_layer.zip idp_commons > /dev/null
+    - echo "Zip created at build_artifacts/idp_commons_layer.zip"
+
+terraform:
+  extends: .terraform:deploy  # Or your actual job name
+  artifacts:
+    paths:
+      - build_artifacts/idp_commons_layer.zip
