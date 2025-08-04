@@ -1,0 +1,82 @@
+AWS Account Management & Platform Enablement
+	•	Manage and maintain multiple AWS accounts used across EDA (Enterprise Data & Analytics) platforms.
+	•	Act as the point of contact for provisioning and onboarding of new AWS accounts in accordance with organizational standards and security guidelines.
+	•	Coordinate with the AWS Core Platform Team to ensure proper configurations, account governance (e.g., SCPs, IAM boundaries), and enablement of necessary services.
+	•	Support tagging strategy and cost tracking setup in AWS for resources across accounts.
+
+⸻
+
+2. GitLab CI/CD Enablement & Support
+	•	Serve as a liaison between application teams and the DevOps team for onboarding GitLab repositories for CI/CD pipelines.
+	•	Perform prerequisite checks and validations for new CI/CD submissions including:
+	•	Verification of repository structure and naming conventions.
+	•	Coordination with DevOps to register GitLab Runners for specific repositories.
+	•	Ensuring pipeline jobs have appropriate permissions and AWS roles.
+	•	Troubleshoot pipeline issues with DevOps and developers, especially those involving IAM roles, GitLab runners, or artifact deployment.
+
+⸻
+
+3. Infrastructure Provisioning via GitLab Pipelines
+	•	Support teams in launching AWS resources (EKS clusters, Lambda, RDS, S3, etc.) through automated GitLab CI/CD pipelines.
+	•	Assist with the configuration and use of Terraform modules or CloudFormation stacks integrated within pipelines.
+	•	Maintain and evolve pipeline templates and infrastructure-as-code (IaC) patterns in alignment with best practices.
+
+⸻
+
+4. DNS Integration & Private Connectivity
+	•	Coordinate with the on-prem DNS team to configure and validate:
+	•	Route 53 hosted zones (private and public).
+	•	Conditional forwarders for name resolution across cloud and on-prem environments.
+	•	Serve as technical lead for DNS resolution issues related to private subnets, VPC endpoints, and cross-environment name resolution.
+	•	Drive the end-to-end process of DNS alignment with AWS-hosted services.
+
+⸻
+
+5. OpenSearch (Private Access) Enablement
+	•	Set up OpenSearch with VPC-based access and endpoint policies for internal (private) consumption.
+	•	Guide internal platform teams (AWS core, DNS, Azure AD, networking) to align on architecture:
+	•	VPC peering, routing, and access controls.
+	•	Security group and NACL configurations.
+	•	IAM-based authentication or federated access via Azure AD if applicable.
+	•	Support application teams in onboarding to OpenSearch securely and efficiently.
+
+⸻
+
+6. EKS (Elastic Kubernetes Service) Support
+	•	Assist in setting up EKS clusters and integrating them with GitLab CI/CD pipelines.
+	•	Ensure EKS nodes, IAM roles for service accounts (IRSA), and networking are properly configured.
+	•	Provide support around EKS-related components including:
+	•	Cluster bootstrapping.
+	•	Ingress controller setup.
+	•	CoreDNS and service discovery troubleshooting.
+
+⸻
+
+7. Cross-Team Collaboration & Technical Guidance
+	•	Facilitate collaboration between multiple teams including:
+	•	DevOps for CI/CD tooling.
+	•	DNS team for network resolution.
+	•	Azure AD/Identity team for federated access.
+	•	AWS Platform for network, security, and IAM alignment.
+	•	Translate application requirements into platform-level configurations.
+	•	Provide mentorship and guidance to new team members or app teams about onboarding best practices.
+
+⸻
+
+8. Private Connectivity & Networking
+	•	Own the setup and validation of private connectivity paths including:
+	•	VPC endpoints (Interface and Gateway).
+	•	Transit Gateway or VPC peering configurations.
+	•	Route tables and network ACLs for internal routing.
+	•	Work with security teams to ensure connectivity paths adhere to compliance and isolation policies.
+	•	Test and verify connectivity between services (e.g., GitLab runners to EKS/OpenSearch).
+
+⸻
+
+9. Documentation & Process Improvement
+	•	Maintain up-to-date documentation for:
+	•	GitLab CI/CD onboarding processes.
+	•	Network setup procedures (Route 53, VPC endpoints).
+	•	OpenSearch and EKS integration steps.
+	•	Proactively identify gaps in processes and propose automation or standardization.
+	•	Contribute to platform knowledge base and FAQs.
