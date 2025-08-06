@@ -1,0 +1,5 @@
+sudo dnf groupinstall "Development Tools" -y
+sudo dnf install -y python3-devel cmake \
+    freetype-devel harfbuzz-devel libjpeg-turbo-devel \
+    openjpeg2-devel libX11-devel libxcb-devel zlib-devel \
+    libpng-devel cairo-devel
