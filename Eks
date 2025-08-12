@@ -1,0 +1,61 @@
+#!/bin/bash
+set -ex
+
+CLUSTER_NAME="your-cluster-name"
+REGION="your-region"  # e.g., us-east-1
+
+# Install basic tools
+dnf install -y awscli jq curl unzip
+
+# Install containerd and kubelet
+dnf install -y containerd kubelet
+systemctl enable containerd
+systemctl start containerd
+
+# Write required kubelet environment file
+mkdir -p /etc/sysconfig
+cat <<EOF > /etc/sysconfig/kubelet
+KUBELET_EXTRA_ARGS="--container-runtime=remote --container-runtime-endpoint=unix:///run/containerd/containerd.sock --node-ip=$(curl -s http://169.254.169.254/latest/meta-data/local-ipv4)"
+EOF
+
+# Write kubelet kubeconfig
+CA=$(aws eks describe-cluster --name $CLUSTER_NAME --region $REGION --query "cluster.certificateAuthority.data" --output text)
+ENDPOINT=$(aws eks describe-cluster --name $CLUSTER_NAME --region $REGION --query "cluster.endpoint" --output text)
+
+mkdir -p /var/lib/kubelet
+mkdir -p /etc/kubernetes
+
+cat <<EOF > /etc/kubernetes/kubelet.conf
+apiVersion: v1
+clusters:
+- cluster:
+    certificate-authority-data: $CA
+    server: $ENDPOINT
+  name: eks
+contexts:
+- context:
+    cluster: eks
+    user: aws
+  name: aws
+current-context: aws
+kind: Config
+preferences: {}
+users:
+- name: aws
+  user:
+    exec:
+      apiVersion: "client.authentication.k8s.io/v1beta1"
+      command: "aws"
+      args:
+        - "eks"
+        - "get-token"
+        - "--cluster-name"
+        - "$CLUSTER_NAME"
+        - "--region"
+        - "$REGION"
+EOF
+
+# Start kubelet
+systemctl daemon-reexec
+systemctl daemon-reload
+systemctl enable --now kubelet
