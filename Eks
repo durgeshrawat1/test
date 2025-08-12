@@ -1,0 +1,54 @@
+#!/bin/bash
+set -ex
+
+# Set cluster name and region
+CLUSTER_NAME="your-cluster-name"
+REGION="your-region"  # e.g., us-west-2
+
+# Install SSM (optional but useful for debugging)
+dnf install -y amazon-ssm-agent
+systemctl enable --now amazon-ssm-agent
+
+# Install kubelet and aws-iam-authenticator
+dnf install -y kubelet aws-cli curl
+
+# Get cluster endpoint and CA
+INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id)
+TOKEN=$(curl -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
+CLUSTER_ENDPOINT=$(aws eks describe-cluster --name $CLUSTER_NAME --region $REGION --query "cluster.endpoint" --output text)
+CLUSTER_CA=$(aws eks describe-cluster --name $CLUSTER_NAME --region $REGION --query "cluster.certificateAuthority.data" --output text)
+
+mkdir -p /etc/kubernetes
+cat <<EOF > /etc/kubernetes/kubelet.conf
+apiVersion: v1
+clusters:
+- cluster:
+    server: $CLUSTER_ENDPOINT
+    certificate-authority-data: $CLUSTER_CA
+  name: eks
+contexts:
+- context:
+    cluster: eks
+    user: aws
+  name: aws
+current-context: aws
+kind: Config
+preferences: {}
+users:
+- name: aws
+  user:
+    exec:
+      apiVersion: "client.authentication.k8s.io/v1beta1"
+      command: "aws"
+      args:
+        - "eks"
+        - "get-token"
+        - "--cluster-name"
+        - "$CLUSTER_NAME"
+        - "--region"
+        - "$REGION"
+EOF
+
+# Enable and start kubelet
+systemctl enable kubelet
+systemctl start kubelet
