@@ -1,0 +1,17 @@
+# ebs-test-pod.yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ebs-test-pod
+spec:
+  containers:
+    - name: busybox
+      image: busybox
+      command: ["sh", "-c", "while true; do sleep 5; done"]
+      volumeMounts:
+        - name: ebs-volume
+          mountPath: /data
+  volumes:
+    - name: ebs-volume
+      persistentVolumeClaim:
+        claimName: ebs-test-gp2   # <-- Replace with your actual PVC name
