@@ -1,0 +1,37 @@
+http://<your-ec2-ip>:4000/graphql
+
+
+{
+  "name": "graphql-server",
+  "version": "1.0.0",
+  "main": "server.js",
+  "license": "MIT",
+  "dependencies": {
+    "apollo-server": "^3.12.0",
+    "aws-sdk": "^2.1481.0",
+    "graphql": "^16.6.0",
+    "graphql-subscriptions": "^2.0.0",
+    "graphql-ws": "^5.11.0",
+    "ws": "^8.13.0"
+  }
+}
+
+
+# Use Node.js base image
+FROM node:18
+
+# Create app directory
+WORKDIR /usr/src/app
+
+# Copy package.json and install deps
+COPY package*.json ./
+RUN npm install
+
+# Copy the rest of your app
+COPY . .
+
+# Expose your GraphQL server port
+EXPOSE 4000
+
+# Start the server
+CMD ["node", "server.js"]
