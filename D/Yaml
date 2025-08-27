@@ -1,0 +1,67 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: apollo-graphql
+  labels:
+    app: apollo-graphql
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: apollo-graphql
+  template:
+    metadata:
+      labels:
+        app: apollo-graphql
+    spec:
+      containers:
+        - name: apollo-server
+          image: your-dockerhub-username/idp-graphql:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 4000
+          env:
+            - name: AWS_REGION
+              value: "us-east-1"
+            - name: DDB_TABLE
+              value: "your-dynamodb-table-name"
+            - name: NODE_ENV
+              value: "production"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: apollo-graphql
+  labels:
+    app: apollo-graphql
+spec:
+  type: ClusterIP
+  ports:
+    - port: 80
+      targetPort: 4000
+      protocol: TCP
+      name: http
+  selector:
+    app: apollo-graphql
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: apollo-graphql-ingress
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: graphql.yourdomain.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: apollo-graphql
+                port:
+                  number: 80
