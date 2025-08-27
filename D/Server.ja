@@ -1,0 +1,146 @@
+const { ApolloServer, gql } = require('apollo-server');
+const { createServer } = require('http');
+const { useServer } = require('graphql-ws/lib/use/ws');
+const { WebSocketServer } = require('ws');
+const fs = require('fs');
+const AWS = require('aws-sdk');
+
+// AWS config
+AWS.config.update({ region: 'your-aws-region' });
+const dynamoDb = new AWS.DynamoDB.DocumentClient();
+const TABLE_NAME = 'YourDynamoDBTableName';
+
+// Read schema (without AppSync directives)
+const typeDefs = gql`${fs.readFileSync('schema.graphql', 'utf8')}`;
+
+// DynamoDB key helper
+const getDynamoKeys = (objectKey) => ({
+  PK: objectKey,
+  SK: objectKey,
+});
+
+// PubSub simulation (basic in-memory pubsub for subscriptions)
+const { PubSub } = require('graphql-subscriptions');
+const pubsub = new PubSub();
+
+// Subscription event names
+const DOCUMENT_CREATED = 'DOCUMENT_CREATED';
+const DOCUMENT_UPDATED = 'DOCUMENT_UPDATED';
+
+// Resolvers
+const resolvers = {
+  Query: {
+    getDocument: async (_, { ObjectKey }) => {
+      const params = { TableName: TABLE_NAME, Key: getDynamoKeys(ObjectKey) };
+      const result = await dynamoDb.get(params).promise();
+      return result.Item || null;
+    },
+    listDocuments: async () => {
+      const params = { TableName: TABLE_NAME, Limit: 100 };
+      const result = await dynamoDb.scan(params).promise();
+      return { Documents: result.Items || [], nextToken: null };
+    },
+  },
+  Mutation: {
+    createDocument: async (_, { input }) => {
+      const objectKey = input.ObjectKey || `doc-${Date.now()}`;
+      const item = { PK: objectKey, SK: objectKey, ...input };
+      await dynamoDb.put({ TableName: TABLE_NAME, Item: item }).promise();
+
+      // Publish subscription event
+      pubsub.publish(DOCUMENT_CREATED, { onCreateDocument: { ObjectKey: objectKey } });
+
+      return { ObjectKey: objectKey };
+    },
+    updateDocument: async (_, { input }) => {
+      const objectKey = input.ObjectKey;
+      if (!objectKey) throw new Error('ObjectKey is required for update');
+
+      let updateExp = 'set';
+      const expAttrValues = {};
+      const expAttrNames = {};
+      let first = true;
+
+      Object.entries(input).forEach(([key, value]) => {
+        if (key === 'ObjectKey') return;
+        if (!first) updateExp += ', ';
+        updateExp += ` #${key} = :${key}`;
+        expAttrValues[`:${key}`] = value;
+        expAttrNames[`#${key}`] = key;
+        first = false;
+      });
+
+      const params = {
+        TableName: TABLE_NAME,
+        Key: getDynamoKeys(objectKey),
+        UpdateExpression: updateExp,
+        ExpressionAttributeValues: expAttrValues,
+        ExpressionAttributeNames: expAttrNames,
+        ReturnValues: 'ALL_NEW',
+      };
+      const result = await dynamoDb.update(params).promise();
+
+      pubsub.publish(DOCUMENT_UPDATED, { onUpdateDocument: result.Attributes });
+
+      return result.Attributes;
+    },
+    deleteDocument: async (_, { objectKeys }) => {
+      if (!Array.isArray(objectKeys)) throw new Error('objectKeys array is required');
+      const deleteRequests = objectKeys.map(key => ({ DeleteRequest: { Key: getDynamoKeys(key) } }));
+
+      for (let i = 0; i < deleteRequests.length; i += 25) {
+        const chunk = deleteRequests.slice(i, i + 25);
+        await dynamoDb.batchWrite({ RequestItems: { [TABLE_NAME]: chunk } }).promise();
+      }
+      return true;
+    },
+  },
+  Subscription: {
+    onCreateDocument: {
+      subscribe: () => pubsub.asyncIterator([DOCUMENT_CREATED]),
+    },
+    onUpdateDocument: {
+      subscribe: () => pubsub.asyncIterator([DOCUMENT_UPDATED]),
+    },
+  },
+};
+
+// Create http server for both http and websocket
+const httpServer = createServer();
+
+// Create WebSocket server
+const wsServer = new WebSocketServer({
+  server: httpServer,
+  path: '/graphql',
+});
+
+// Hand over to graphql-ws to handle subscriptions
+const serverCleanup = useServer({ schema: { typeDefs, resolvers } }, wsServer);
+
+// Apollo server instance
+const server = new ApolloServer({
+  typeDefs,
+  resolvers,
+  plugins: [{
+    async serverWillStart() {
+      return {
+        async drainServer() {
+          await serverCleanup.dispose();
+        },
+      };
+    },
+  }],
+});
+
+async function start() {
+  await server.start();
+  server.applyMiddleware({ app: httpServer });
+
+  const PORT = 4000;
+  httpServer.listen(PORT, () => {
+    console.log(`🚀 Server ready at http://localhost:${PORT}${server.graphqlPath}`);
+    console.log(`🚀 Subscriptions ready at ws://localhost:${PORT}${server.graphqlPath}`);
+  });
+}
+
+start();
