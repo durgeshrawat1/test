@@ -1,0 +1,1 @@
+npm install express graphql @apollo/server graphql-tag graphql-type-json cors body-parser dotenv @aws-sdk/client-dynamodb @aws-sdk/lib-dynamodb
