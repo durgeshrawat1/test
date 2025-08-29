@@ -1,0 +1,212 @@
+require('dotenv').config();
+const express = require('express');
+const http = require('http');
+const { ApolloServer } = require('@apollo/server');
+const { expressMiddleware } = require('@apollo/server/express4');
+const { json } = require('body-parser');
+const cors = require('cors');
+const gql = require('graphql-tag');
+const GraphQLJSON = require('graphql-type-json');
+
+const {
+  DynamoDBClient
+} = require('@aws-sdk/client-dynamodb');
+const {
+  DynamoDBDocumentClient,
+  GetCommand,
+  PutCommand,
+  QueryCommand
+} = require('@aws-sdk/lib-dynamodb');
+
+const REGION = process.env.AWS_REGION || 'us-east-1';
+const TABLE_NAME = process.env.DYNAMODB_TABLE || 'YourDynamoDbTable';
+const client = new DynamoDBClient({ region: REGION });
+const docClient = DynamoDBDocumentClient.from(client);
+
+const typeDefs = gql`
+  scalar AWSDateTime
+  scalar AWSTimestamp
+  scalar AWSJSON
+
+  interface DynamoDbBase {
+    PK: ID!
+    SK: ID!
+    ExpiresAfter: AWSTimestamp
+  }
+
+  type Document implements DynamoDbBase {
+    PK: ID!
+    SK: ID!
+    ObjectKey: ID
+    ObjectStatus: String
+    InitialEventTime: AWSDateTime
+    QueuedTime: AWSDateTime
+    WorkflowStartTime: AWSDateTime
+    CompletionTime: AWSDateTime
+    WorkflowExecutionArn: String
+    WorkflowStatus: String
+    PageCount: Int
+    Metering: AWSJSON
+    EvaluationReportUri: String
+    EvaluationStatus: String
+    SummaryReportUri: String
+    ExpiresAfter: AWSTimestamp
+    HITLStatus: String
+    HITLReviewURL: String
+  }
+
+  input CreateDocumentInput {
+    ObjectKey: ID
+    ObjectStatus: String
+    InitialEventTime: AWSDateTime
+    QueuedTime: AWSDateTime
+    ExpiresAfter: AWSTimestamp
+  }
+
+  type CreateDocumentOutput {
+    ObjectKey: ID
+  }
+
+  type DocumentListItem implements DynamoDbBase {
+    PK: ID!
+    SK: ID!
+    ObjectKey: ID
+    InitialEventTime: AWSDateTime
+    ExpiresAfter: AWSTimestamp
+    HITLStatus: String
+    HITLReviewURL: String
+  }
+
+  type DocumentList {
+    Documents: [DocumentListItem]
+    nextToken: String
+  }
+
+  type Query {
+    getDocument(ObjectKey: ID!): Document
+    listDocuments: DocumentList
+  }
+
+  type Mutation {
+    createDocument(input: CreateDocumentInput!): CreateDocumentOutput
+  }
+`;
+
+const resolvers = {
+  AWSDateTime: {
+    __parseValue(value) {
+      return new Date(value);
+    },
+    __serialize(value) {
+      return new Date(value).toISOString();
+    },
+    __parseLiteral(ast) {
+      return new Date(ast.value);
+    }
+  },
+  AWSTimestamp: {
+    __parseValue(value) {
+      return parseInt(value);
+    },
+    __serialize(value) {
+      return parseInt(value);
+    },
+    __parseLiteral(ast) {
+      return parseInt(ast.value);
+    }
+  },
+  AWSJSON: GraphQLJSON,
+
+  Query: {
+    getDocument: async (_, { ObjectKey }) => {
+      const PK = `DOCUMENT#${ObjectKey}`;
+      const SK = `METADATA`;
+      const command = new GetCommand({
+        TableName: TABLE_NAME,
+        Key: { PK, SK }
+      });
+
+      try {
+        const { Item } = await docClient.send(command);
+        return Item || null;
+      } catch (err) {
+        console.error('Error getting document:', err);
+        throw new Error('Error fetching document');
+      }
+    },
+
+    listDocuments: async () => {
+      const command = new QueryCommand({
+        TableName: TABLE_NAME,
+        KeyConditionExpression: 'SK = :sk',
+        ExpressionAttributeValues: {
+          ':sk': 'METADATA'
+        },
+        Limit: 25
+      });
+
+      try {
+        const { Items, LastEvaluatedKey } = await docClient.send(command);
+        return {
+          Documents: Items || [],
+          nextToken: LastEvaluatedKey ? JSON.stringify(LastEvaluatedKey) : null
+        };
+      } catch (err) {
+        console.error('Error listing documents:', err);
+        throw new Error('Error listing documents');
+      }
+    }
+  },
+
+  Mutation: {
+    createDocument: async (_, { input }) => {
+      const PK = `DOCUMENT#${input.ObjectKey}`;
+      const SK = `METADATA`;
+      const item = {
+        PK,
+        SK,
+        ...input
+      };
+
+      const command = new PutCommand({
+        TableName: TABLE_NAME,
+        Item: item
+      });
+
+      try {
+        await docClient.send(command);
+        return { ObjectKey: input.ObjectKey };
+      } catch (err) {
+        console.error('Error creating document:', err);
+        throw new Error('Error creating document');
+      }
+    }
+  }
+};
+
+// --- Start Apollo Server ---
+async function startApollo() {
+  const app = express();
+  const httpServer = http.createServer(app);
+
+  const server = new ApolloServer({
+    typeDefs,
+    resolvers
+  });
+
+  await server.start();
+
+  app.use(
+    '/graphql',
+    cors(),
+    json(),
+    expressMiddleware(server)
+  );
+
+  const PORT = process.env.PORT || 4000;
+  httpServer.listen(PORT, () => {
+    console.log(`🚀 Apollo GraphQL ready at http://localhost:${PORT}/graphql`);
+  });
+}
+
+startApollo();
