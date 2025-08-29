@@ -1,0 +1,189 @@
+import 'dotenv/config';
+import express from 'express';
+import { ApolloServer } from '@apollo/server';
+import { expressMiddleware } from '@apollo/server/express4';
+import cors from 'cors';
+import bodyParser from 'body-parser';
+import gql from 'graphql-tag';
+import GraphQLJSON from 'graphql-type-json';
+import { renderStaticGraphiQL } from 'graphiql';
+
+import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
+import {
+  DynamoDBDocumentClient,
+  GetCommand,
+  PutCommand,
+  QueryCommand,
+} from '@aws-sdk/lib-dynamodb';
+
+// Config
+const REGION = process.env.AWS_REGION || 'us-east-1';
+const TABLE_NAME = process.env.DYNAMODB_TABLE || 'YourDynamoDbTable';
+const PORT = process.env.PORT || 4000;
+
+// DynamoDB client
+const client = new DynamoDBClient({ region: REGION });
+const docClient = DynamoDBDocumentClient.from(client);
+
+// Schema
+const typeDefs = gql`
+  scalar AWSDateTime
+  scalar AWSTimestamp
+  scalar AWSJSON
+
+  interface DynamoDbBase {
+    PK: ID!
+    SK: ID!
+    ExpiresAfter: AWSTimestamp
+  }
+
+  type Document implements DynamoDbBase {
+    PK: ID!
+    SK: ID!
+    ObjectKey: ID
+    ObjectStatus: String
+    InitialEventTime: AWSDateTime
+    QueuedTime: AWSDateTime
+    WorkflowStartTime: AWSDateTime
+    CompletionTime: AWSDateTime
+    WorkflowExecutionArn: String
+    WorkflowStatus: String
+    PageCount: Int
+    Metering: AWSJSON
+    EvaluationReportUri: String
+    EvaluationStatus: String
+    SummaryReportUri: String
+    ExpiresAfter: AWSTimestamp
+    HITLStatus: String
+    HITLReviewURL: String
+  }
+
+  input CreateDocumentInput {
+    ObjectKey: ID
+    ObjectStatus: String
+    InitialEventTime: AWSDateTime
+    QueuedTime: AWSDateTime
+    ExpiresAfter: AWSTimestamp
+  }
+
+  type CreateDocumentOutput {
+    ObjectKey: ID
+  }
+
+  type DocumentListItem implements DynamoDbBase {
+    PK: ID!
+    SK: ID!
+    ObjectKey: ID
+    InitialEventTime: AWSDateTime
+    ExpiresAfter: AWSTimestamp
+    HITLStatus: String
+    HITLReviewURL: String
+  }
+
+  type DocumentList {
+    Documents: [DocumentListItem]
+    nextToken: String
+  }
+
+  type Query {
+    getDocument(ObjectKey: ID!): Document
+    listDocuments: DocumentList
+  }
+
+  type Mutation {
+    createDocument(input: CreateDocumentInput!): CreateDocumentOutput
+  }
+`;
+
+// Resolvers
+const resolvers = {
+  AWSDateTime: {
+    __parseValue: value => new Date(value),
+    __serialize: value => new Date(value).toISOString(),
+    __parseLiteral: ast => new Date(ast.value),
+  },
+  AWSTimestamp: {
+    __parseValue: value => parseInt(value),
+    __serialize: value => parseInt(value),
+    __parseLiteral: ast => parseInt(ast.value),
+  },
+  AWSJSON: GraphQLJSON,
+
+  Query: {
+    getDocument: async (_, { ObjectKey }) => {
+      const PK = `DOCUMENT#${ObjectKey}`;
+      const SK = 'METADATA';
+
+      const result = await docClient.send(new GetCommand({
+        TableName: TABLE_NAME,
+        Key: { PK, SK }
+      }));
+
+      return result.Item || null;
+    },
+
+    listDocuments: async () => {
+      const result = await docClient.send(new QueryCommand({
+        TableName: TABLE_NAME,
+        IndexName: 'SK-index',
+        KeyConditionExpression: 'SK = :sk',
+        ExpressionAttributeValues: {
+          ':sk': 'METADATA'
+        },
+        Limit: 25
+      }));
+
+      return {
+        Documents: result.Items || [],
+        nextToken: result.LastEvaluatedKey
+          ? JSON.stringify(result.LastEvaluatedKey)
+          : null
+      };
+    }
+  },
+
+  Mutation: {
+    createDocument: async (_, { input }) => {
+      const PK = `DOCUMENT#${input.ObjectKey}`;
+      const SK = 'METADATA';
+
+      const item = {
+        PK,
+        SK,
+        ...input
+      };
+
+      await docClient.send(new PutCommand({
+        TableName: TABLE_NAME,
+        Item: item
+      }));
+
+      return { ObjectKey: input.ObjectKey };
+    }
+  }
+};
+
+// Start Apollo Server with GraphiQL UI
+async function startServer() {
+  const app = express();
+  const server = new ApolloServer({ typeDefs, resolvers, introspection: true });
+
+  await server.start();
+
+  // ✅ GraphQL endpoint
+  app.use('/graphql', cors(), bodyParser.json(), expressMiddleware(server));
+
+  // ✅ Local GraphiQL interface (no CSP issues)
+  app.get('/graphiql', (req, res) => {
+    const html = renderStaticGraphiQL({ endpoint: '/graphql' });
+    res.setHeader('Content-Type', 'text/html');
+    res.send(html);
+  });
+
+  app.listen(PORT, () => {
+    console.log(`🚀 GraphQL ready at http://localhost:${PORT}/graphql`);
+    console.log(`🧪 GraphiQL UI at http://localhost:${PORT}/graphiql`);
+  });
+}
+
+startServer();
