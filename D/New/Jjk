@@ -1,9 +1,0 @@
-npm init -y
-
-
-npm install express dotenv graphql graphql-tag @apollo/server @apollo/server-plugin-drainHttpServer body-parser cors graphql-type-json @aws-sdk/client-dynamodb @aws-sdk/lib-dynamodb
-
-
-
-
-npm install express dotenv graphql graphql-tag @apollo/server @apollo/server-express4 body-parser cors graphql-type-json @aws-sdk/client-dynamodb @aws-sdk/lib-dynamodb
