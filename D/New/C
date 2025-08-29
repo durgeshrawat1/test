@@ -1,0 +1,53 @@
+import 'dotenv/config';
+import express from 'express';
+import { ApolloServer } from '@apollo/server';
+import { expressMiddleware } from '@apollo/server/express4';
+import cors from 'cors';
+import bodyParser from 'body-parser';
+import gql from 'graphql-tag';
+import GraphQLJSON from 'graphql-type-json';
+import {
+  DynamoDBClient
+} from '@aws-sdk/client-dynamodb';
+import {
+  DynamoDBDocumentClient,
+  GetCommand,
+  PutCommand,
+  QueryCommand
+} from '@aws-sdk/lib-dynamodb';
+
+const REGION = process.env.AWS_REGION || 'us-east-1';
+const TABLE_NAME = process.env.DYNAMODB_TABLE || 'YourDynamoDbTable';
+const PORT = process.env.PORT || 4000;
+
+const client = new DynamoDBClient({ region: REGION });
+const docClient = DynamoDBDocumentClient.from(client);
+
+// Your GraphQL schema and resolvers here (typeDefs, resolvers)...
+// -- skipped here for brevity -- use the ones from earlier
+
+const server = new ApolloServer({
+  typeDefs,
+  resolvers,
+});
+
+await server.start();
+
+const app = express();
+
+// ✅ ADD THIS CSP FIX BEFORE the graphql middleware
+app.use('/graphql', (req, res, next) => {
+  res.setHeader(
+    'Content-Security-Policy',
+    "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net;"
+  );
+  next();
+});
+
+// ✅ Now apply the Apollo middleware
+app.use('/graphql', cors(), bodyParser.json(), expressMiddleware(server));
+
+// ✅ Start server
+app.listen(PORT, () => {
+  console.log(`🚀 Server running at http://localhost:${PORT}/graphql`);
+});
