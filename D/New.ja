@@ -1,0 +1,219 @@
+import express from 'express';
+import { createServer } from 'http';
+import { ApolloServer } from '@apollo/server';
+import { expressMiddleware } from '@apollo/server/express4';
+import { ApolloServerPluginDrainHttpServer } from '@apollo/server/plugin/drainHttpServer';
+import { makeExecutableSchema } from '@graphql-tools/schema';
+import { WebSocketServer } from 'ws';
+import { useServer } from 'graphql-ws/lib/use/ws';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import AWS from 'aws-sdk';
+import { PubSub } from 'graphql-subscriptions';
+import dotenv from 'dotenv';
+import cors from 'cors';
+import bodyParser from 'body-parser';
+import playground from 'graphql-playground-middleware-express';
+
+dotenv.config();
+
+// Setup __dirname for ESM
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// Load GraphQL schema
+const typeDefs = fs.readFileSync(path.join(__dirname, 'schema.graphql'), 'utf8');
+
+// AWS config
+AWS.config.update({ region: process.env.AWS_REGION || 'us-east-1' });
+// No explicit credentials = SDK uses IAM role or instance profile
+const ddb = new AWS.DynamoDB.DocumentClient();
+const s3 = new AWS.S3();
+const TABLE = process.env.DDB_TABLE || 'YourDynamoDBTable';
+
+// PubSub for Subscriptions
+const pubsub = new PubSub();
+const CREATED = 'DOC_CREATED';
+const UPDATED = 'DOC_UPDATED';
+
+// Resolvers
+const resolvers = {
+  Query: {
+    getDocument: async (_, { ObjectKey }) => {
+      try {
+        console.log("🔍 Fetching document:", ObjectKey);
+        const res = await ddb.get({ TableName: TABLE, Key: { PK: ObjectKey, SK: ObjectKey } }).promise();
+        return res.Item || null;
+      } catch (error) {
+        console.error("❌ Error in getDocument:", error);
+        throw new Error("Failed to fetch document.");
+      }
+    },
+    listDocuments: async () => {
+      try {
+        const res = await ddb.scan({ TableName: TABLE, Limit: 100 }).promise();
+        return { Documents: res.Items || [], nextToken: null };
+      } catch (error) {
+        console.error("❌ Error in listDocuments:", error);
+        throw new Error("Failed to list documents.");
+      }
+    },
+    getFileContents: async (_, { s3Uri }) => {
+      try {
+        const parts = s3Uri.replace('s3://', '').split('/');
+        const Bucket = parts.shift();
+        const Key = parts.join('/');
+        const res = await s3.getObject({ Bucket, Key }).promise();
+        return {
+          content: res.Body.toString('utf-8'),
+          contentType: res.ContentType,
+          size: res.ContentLength,
+          isBinary: false,
+        };
+      } catch (error) {
+        console.error("❌ Error fetching file:", error);
+        throw new Error("Failed to fetch file from S3.");
+      }
+    },
+  },
+  Mutation: {
+    createDocument: async (_, { input }) => {
+      try {
+        console.log("📥 Received createDocument:", input);
+        const key = input.ObjectKey || `doc-${Date.now()}`;
+        const item = { PK: key, SK: key, ...input };
+        await ddb.put({ TableName: TABLE, Item: item }).promise();
+        pubsub.publish(CREATED, { onCreateDocument: { ObjectKey: key } });
+        return { ObjectKey: key };
+      } catch (error) {
+        console.error("❌ Error in createDocument:", error);
+        throw new Error("Failed to create document.");
+      }
+    },
+    updateDocument: async (_, { input }) => {
+      try {
+        const key = input.ObjectKey;
+        if (!key) throw new Error('ObjectKey is required');
+        let expr = 'set';
+        const names = {}, values = {};
+        for (const [k, v] of Object.entries(input)) {
+          if (k === 'ObjectKey') continue;
+          expr += ` #${k} = :${k},`;
+          names[`#${k}`] = k;
+          values[`:${k}`] = v;
+        }
+        expr = expr.slice(0, -1);
+        const res = await ddb.update({
+          TableName: TABLE,
+          Key: { PK: key, SK: key },
+          UpdateExpression: expr,
+          ExpressionAttributeNames: names,
+          ExpressionAttributeValues: values,
+          ReturnValues: 'ALL_NEW',
+        }).promise();
+        pubsub.publish(UPDATED, { onUpdateDocument: res.Attributes });
+        return res.Attributes;
+      } catch (error) {
+        console.error("❌ Error in updateDocument:", error);
+        throw new Error("Failed to update document.");
+      }
+    },
+    deleteDocument: async (_, { objectKeys }) => {
+      try {
+        const chunks = [];
+        for (let i = 0; i < objectKeys.length; i += 25) {
+          chunks.push(objectKeys.slice(i, i + 25));
+        }
+        for (const chunk of chunks) {
+          await ddb.batchWrite({
+            RequestItems: {
+              [TABLE]: chunk.map((k) => ({ DeleteRequest: { Key: { PK: k, SK: k } } })),
+            },
+          }).promise();
+        }
+        return true;
+      } catch (error) {
+        console.error("❌ Error in deleteDocument:", error);
+        throw new Error("Failed to delete documents.");
+      }
+    },
+  },
+  Subscription: {
+    onCreateDocument: { subscribe: () => pubsub.asyncIterator(CREATED) },
+    onUpdateDocument: { subscribe: () => pubsub.asyncIterator(UPDATED) },
+  },
+};
+
+// Build schema
+const schema = makeExecutableSchema({ typeDefs, resolvers });
+
+// Start server
+async function start() {
+  const app = express();
+  const httpServer = createServer(app);
+  const wsServer = new WebSocketServer({ server: httpServer, path: '/graphql' });
+  const serverCleanup = useServer({ schema }, wsServer);
+
+  const apollo = new ApolloServer({
+    schema,
+    introspection: true,
+    plugins: [
+      ApolloServerPluginDrainHttpServer({ httpServer }),
+      {
+        async serverWillStart() {
+          return {
+            async drainServer() {
+              await serverCleanup.dispose();
+            },
+          };
+        },
+      },
+    ],
+  });
+
+  await apollo.start();
+
+  app.use(cors());
+  app.use(bodyParser.json());
+  app.use('/graphql', expressMiddleware(apollo));
+
+  // GraphQL Playground
+  app.get('/graphql', playground({ endpoint: '/graphql' }));
+
+  const port = process.env.PORT || 4000;
+  httpServer.listen(port, () => {
+    console.log(`🚀 GraphQL API ready at http://localhost:${port}/graphql`);
+    console.log(`📡 Subscriptions ready at ws://localhost:${port}/graphql`);
+    console.log(`🧪 Playground at http://localhost:${port}/graphql`);
+  });
+}
+
+start().catch((err) => {
+  console.error("❌ Failed to start server:", err);
+});
+
+
+{
+  "name": "graphql-dynamodb-api",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@apollo/server": "^4.10.0",
+    "@graphql-tools/schema": "^10.0.0",
+    "aws-sdk": "^2.1532.0",
+    "body-parser": "^1.20.2",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
+    "express": "^4.19.2",
+    "graphql": "^16.8.1",
+    "graphql-subscriptions": "^2.1.0",
+    "graphql-ws": "^5.14.2",
+    "graphql-playground-middleware-express": "^1.7.23",
+    "ws": "^8.16.0"
+  }
+}
