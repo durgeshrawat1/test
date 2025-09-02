@@ -1,0 +1,71 @@
+import boto3
+import os
+import json
+from datetime import datetime, timezone, timedelta
+import logging
+
+from idp_common.models import Document, Status
+from idp_common.dynamodb import DocumentDynamoDBService  # 👈 BYPASS APPSYNC HERE
+
+# ---------------------------- Logging Setup ----------------------------
+logger = logging.getLogger()
+logger.setLevel(os.environ.get("LOG_LEVEL", "INFO"))
+logging.getLogger('idp_common.bedrock.client').setLevel(os.environ.get("BEDROCK_LOG_LEVEL", "INFO"))
+
+# ---------------------------- Clients Init ----------------------------
+sqs = boto3.client('sqs')
+queue_url = os.environ['QUEUE_URL']
+retentionDays = int(os.environ['DATA_RETENTION_IN_DAYS'])
+
+# 👇 REPLACE create_document_service() with direct instantiation
+document_service = DocumentDynamoDBService()  # Uses TRACKING_TABLE env var
+
+# ---------------------------- Handler ----------------------------
+def handler(event, context):
+    logger.info(f"Processing event: {json.dumps(event)}")
+    
+    detail = event['detail']
+    object_key = detail['object']['key']
+    logger.info(f"Processing file: {object_key}")
+    
+    # Output bucket
+    output_bucket = os.environ.get('OUTPUT_BUCKET', '')
+    if output_bucket == '':
+        raise Exception("OUTPUT_BUCKET environment variable not set")
+    
+    # Create document
+    current_time = datetime.now(timezone.utc).isoformat()
+    document = Document.from_s3_event(event, output_bucket)
+    document.status = Status.QUEUED
+    document.queued_time = current_time
+
+    # TTL
+    expires_after = int((datetime.now(timezone.utc) + timedelta(days=retentionDays)).timestamp())
+
+    # Create document in DynamoDB
+    logger.info(f"Creating document via DocumentDynamoDBService: {document.input_key}")
+    created_key = document_service.create_document(document, expires_after=expires_after)
+    logger.info(f"Document created with key: {created_key}")
+
+    # Send to SQS
+    doc_json = document.to_json()
+    message = {
+        'QueueUrl': queue_url,
+        'MessageBody': doc_json,
+        'MessageAttributes': {
+            'EventType': {
+                'StringValue': 'DocumentQueued',
+                'DataType': 'String'
+            },
+            'ObjectKey': {
+                'StringValue': object_key,
+                'DataType': 'String'
+            }
+        }
+    }
+
+    logger.info(f"Sending document to SQS queue: {object_key}")
+    response = sqs.send_message(**message)
+    logger.info(f"SQS response: {response}")
+    
+    return {'statusCode': 200, 'detail': detail, 'document_id': document.id}
