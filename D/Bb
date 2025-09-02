@@ -27,7 +27,18 @@ spec:
       port: 80
       targetPort: 4000
 
+app.use((req, res, next) => {
+  res.setHeader('Content-Security-Policy', "default-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net");
+  next();
+});
 
+app.get(
+  '/graphql',
+  expressPlayground({
+    endpoint: '/graphql',
+    subscriptionEndpoint: `ws://localhost:${process.env.PORT || 4000}/graphql`,
+  })
+);
 
 {
   "dependencies": {
