@@ -1,0 +1,79 @@
+import AWS from 'aws-sdk';
+import { PubSub } from 'graphql-subscriptions';
+
+const ddb = new AWS.DynamoDB.DocumentClient();
+const pubsub = new PubSub();
+const CREATED = 'DOC_CREATED'; // Same as in schema Subscription
+
+const resolvers = {
+  Mutation: {
+    createDocument: async (_, { input }) => {
+      console.log("📦 Received createDocument mutation");
+
+      try {
+        // Validate input
+        if (!input || typeof input !== 'object') {
+          console.error("❌ Invalid input received:", input);
+          throw new Error("Invalid input: input must be an object");
+        }
+
+        const { ObjectKey, ObjectStatus, QueuedTime, ExpiresAfter } = input;
+
+        if (!ObjectKey) {
+          console.error("❌ Missing ObjectKey in input:", input);
+          throw new Error("ObjectKey is required");
+        }
+
+        // Construct the item to store in DynamoDB
+        const item = {
+          PK: ObjectKey,
+          SK: ObjectKey,
+          ObjectKey,
+          ObjectStatus: ObjectStatus || 'QUEUED',
+          QueuedTime: QueuedTime || new Date().toISOString(),
+          ExpiresAfter: ExpiresAfter || Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 30 // 30 days TTL
+        };
+
+        console.log("📥 Writing to DynamoDB:", item);
+
+        // Put item into DynamoDB
+        await ddb.put({
+          TableName: process.env.DDB_TABLE,
+          Item: item
+        }).promise();
+
+        console.log("✅ Document written to DynamoDB:", ObjectKey);
+
+        // Publish the event (if subscriptions are used)
+        try {
+          await pubsub.publish(CREATED, {
+            onCreateDocument: { ObjectKey }
+          });
+          console.log("📡 Published DOC_CREATED event:", ObjectKey);
+        } catch (pubErr) {
+          console.warn("⚠️ Failed to publish event to subscribers:", pubErr.message);
+        }
+
+        return { ObjectKey };
+
+      } catch (err) {
+        console.error("🔥 Error in createDocument:", err.message);
+        console.error(err.stack);
+        throw new Error("Failed to create document: " + err.message);
+      }
+    }
+  },
+
+  Subscription: {
+    onCreateDocument: {
+      subscribe: () => pubsub.asyncIterator([CREATED]),
+    },
+  }
+};
+
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('💥 Unhandled Rejection:', reason);
+});
+
+
