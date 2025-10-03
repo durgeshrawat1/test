@@ -1,4 +1,15 @@
-dnf repolistsudo dnf config-manager --add-repo dummy
+dnf repolist
+
+sudo tee /etc/yum.repos.d/docker-ce.repo > /dev/null <<EOF
+[docker-ce-stable]
+name=Docker CE (placeholder)
+baseurl=https://example.com
+enabled=0
+gpgcheck=0
+EOF
+
+
+dnf config-manager --add-repo dummy
 sudo dnf config-manager --save \
   --setopt=docker-ce-stable.name="Docker CE via Artifactory" \
   --setopt=docker-ce-stable.baseurl=https://artifactory.myorg.com/docker-remote/linux/centos/7/x86_64/stable \
