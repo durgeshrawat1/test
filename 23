@@ -15,3 +15,22 @@ sudo dnf config-manager --save \
   --setopt=docker-ce-stable.baseurl=https://artifactory.myorg.com/docker-remote/linux/centos/7/x86_64/stable \
   --setopt=docker-ce-stable.enabled=1 \
   --setopt=docker-ce-stable.gpgcheck=0
+
+
+[Service]
+ExecStart=
+ExecStart=/usr/bin/dockerd \
+  --tlsverify \
+  --tlscacert=/etc/docker/ssl/ca.pem \
+  --tlscert=/etc/docker/ssl/server-cert.pem \
+  --tlskey=/etc/docker/ssl/server-key.pem \
+  -H tcp://0.0.0.0:2376 \
+  -H unix:///var/run/docker.sock
+
+sudo mkdir -p /etc/systemd/system/docker.service.d
+sudo nano /etc/systemd/system/docker.service.d/override.conf
+
+
+sudo systemctl daemon-reexec
+sudo systemctl daemon-reload
+sudo systemctl restart docker
