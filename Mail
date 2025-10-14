@@ -1,0 +1,41 @@
+Dear Team,
+
+As part of the ongoing remediation efforts for risk findings related to email references in SNS topics and SES identities within our AWS infrastructure, we have assigned remediation owners and due dates for each impacted application.
+
+For a subset of accounts where no ownership could be established, our team will proceed to remove the associated distribution lists (DLs). This is a proactive measure to address the findings in a timely manner.
+
+Key Points:
+	•	Non-Production Accounts:
+We will complete remediation (including removal of unowned DLs) by end of day tomorrow.
+	•	Production Accounts:
+For impacted production environments, a change request will be submitted, and remediation will be completed by the defined date in the CR.
+	•	Action Required:
+If you are a member of a distribution list that gets removed and you stop receiving email alerts, please reach out to me directly for clarification or assistance.
+
+We appreciate your cooperation in helping us close these risk findings efficiently. Please let me know if you have any questions or concerns.
+
+Best regards,
+[Your Full Name]
+[Your Role]
+[Your Contact Info]
+
+As part of our ongoing efforts to remediate risk findings related to SES identities and SNS topics referencing email addresses or distribution lists, I want to share the current plan and timelines:
+
+✅ Remediation Scope & Approach
+	•	Ownership Identified:
+For most findings, application teams have been assigned ownership along with remediation dates and contacts.
+	•	Orphaned References:
+In some accounts, we could not identify ownership for certain distribution lists.
+In these cases, our team will proceed with removing the email references to mitigate the risk.
+
+📆 Remediation Timeline
+	•	Non-Production Accounts:
+Remediation (including DL removals) will be completed by EOD tomorrow, Oct 15.
+	•	Production Accounts:
+For production environments, we will raise appropriate change requests, with remediation scheduled to be completed by [insert date, e.g., Oct 25].
+
+🔔 Communication
+
+We will notify impacted teams, and users can reach out if they notice a disruption in email alerts post-removal. I will be the point of contact for any issues arising from this.
+
+Please let me know if you require further details or a breakdown per account.
