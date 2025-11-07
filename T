@@ -1,0 +1,93 @@
+npx create-react-app amplify-saml-ts-demo --template typescript
+cd amplify-saml-ts-demo
+npm install aws-amplify @aws-amplify/ui-react
+
+
+import React, { useEffect, useState } from "react";
+import { Auth } from "aws-amplify";
+
+interface CognitoUser {
+  username: string;
+  attributes: { email?: string; name?: string };
+}
+
+const App: React.FC = () => {
+  const [user, setUser] = useState<CognitoUser | null>(null);
+
+  // Check if user is signed in on component mount
+  useEffect(() => {
+    Auth.currentAuthenticatedUser()
+      .then((u: any) => setUser({ username: u.username, attributes: u.attributes }))
+      .catch(() => setUser(null));
+  }, []);
+
+  const signIn = () => {
+    Auth.federatedSignIn({ provider: "SAML" });
+  };
+
+  const signOut = () => {
+    Auth.signOut()
+      .then(() => setUser(null))
+      .catch((err) => console.error("Sign out error:", err));
+  };
+
+  return (
+    <div style={{ textAlign: "center", marginTop: "50px" }}>
+      <h1>Amplify + SAML + TypeScript Demo</h1>
+
+      {user ? (
+        <div>
+          <p>Welcome, {user.attributes.name || user.username}!</p>
+          <p>Email: {user.attributes.email}</p>
+          <button onClick={signOut}>Sign Out</button>
+        </div>
+      ) : (
+        <div>
+          <p>You are not signed in.</p>
+          <button onClick={signIn}>Sign in with Entra ID</button>
+        </div>
+      )}
+    </div>
+  );
+};
+
+export default App;
+
+
+
+
+import React from "react";
+import ReactDOM from "react-dom/client";
+import App from "./App";
+import Amplify from "aws-amplify";
+import awsConfig from "./aws-exports";
+
+Amplify.configure(awsConfig);
+
+const root = ReactDOM.createRoot(document.getElementById("root")!);
+root.render(<App />);
+
+
+
+
+const awsConfig = {
+  Auth: {
+    region: "us-east-1",
+    userPoolId: "us-east-1_XXXXXX",       // Your Cognito User Pool ID
+    userPoolWebClientId: "XXXXXXXXXXXXXX", // Your App client ID
+    oauth: {
+      domain: "your-userpool-domain.auth.us-east-1.amazoncognito.com",
+      scope: ["email", "openid", "profile"],
+      redirectSignIn: "https://your-app.amplifyapp.com/",
+      redirectSignOut: "https://your-app.amplifyapp.com/",
+      responseType: "code",
+    },
+  },
+};
+
+export default awsConfig;
+
+
+
+
+
