@@ -1,0 +1,18 @@
+// components/ui/fonts.ts
+import localFont from "next/font/local";
+
+export const inter = localFont({
+  src: [
+    { path: "../../public/fonts/a83df93e.woff2", weight: "400", style: "normal" },
+    { path: "../../public/fonts/b29cd012.woff2", weight: "700", style: "normal" },
+    // add all your Inter variants here
+  ],
+});
+
+export const lusitania = localFont({
+  src: [
+    { path: "../../public/fonts/c44abdd5.woff2", weight: "400", style: "normal" },
+    { path: "../../public/fonts/d77ef321.woff2", weight: "700", style: "normal" },
+    // add any other Lusitania variants
+  ],
+});
