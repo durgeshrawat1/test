@@ -1,0 +1,40 @@
+# Use minimal UBI 8 base
+FROM registry.access.redhat.com/ubi8/ubi-minimal:8.9
+
+# Set environment variables
+ENV LANG=C.UTF-8
+ENV MICRODNF_ALLOW_ERASURE=1
+
+# Install microdnf and tools
+RUN microdnf install -y microdnf && microdnf clean all
+
+# Configure Artifactory repo
+# Replace <USERNAME>, <APIKEY>, and <ARTIFACTORY_URL> with your values
+RUN echo "[artifactory-repo]" > /etc/yum.repos.d/artifactory.repo && \
+    echo "name=Artifactory UBI8 Repo" >> /etc/yum.repos.d/artifactory.repo && \
+    echo "baseurl=https://<USERNAME>:<APIKEY>@<ARTIFACTORY_URL>/ubi8-baseos/" >> /etc/yum.repos.d/artifactory.repo && \
+    echo "enabled=1" >> /etc/yum.repos.d/artifactory.repo && \
+    echo "gpgcheck=0" >> /etc/yum.repos.d/artifactory.repo && \
+    echo "[artifactory-appstream]" >> /etc/yum.repos.d/artifactory.repo && \
+    echo "name=Artifactory UBI8 AppStream" >> /etc/yum.repos.d/artifactory.repo && \
+    echo "baseurl=https://<USERNAME>:<APIKEY>@<ARTIFACTORY_URL>/ubi8-appstream/" >> /etc/yum.repos.d/artifactory.repo && \
+    echo "enabled=1" >> /etc/yum.repos.d/artifactory.repo && \
+    echo "gpgcheck=0" >> /etc/yum.repos.d/artifactory.repo
+
+# Clean cache and update metadata
+RUN microdnf clean all && microdnf makecache
+
+# Install packages directly from Artifactory
+RUN microdnf install -y \
+    bash \
+    curl \
+    vim \
+    python3 \
+    tar \
+    gzip && \
+    microdnf clean all
+
+# Set default working directory
+WORKDIR /workspace
+SHELL ["/bin/bash", "-c"]
+CMD ["/bin/bash"]
