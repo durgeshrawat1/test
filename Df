@@ -38,3 +38,41 @@ RUN microdnf install -y \
 WORKDIR /workspace
 SHELL ["/bin/bash", "-c"]
 CMD ["/bin/bash"]
+
+
+
+
+
+# Base Lambda Python 3.12 image
+FROM public.ecr.aws/lambda/python:3.12
+
+# Set environment
+ENV LANG=C.UTF-8
+ENV MICRODNF_ALLOW_ERASURE=1
+
+# Configure Artifactory repos
+# Replace <USERNAME>, <APIKEY>, <ARTIFACTORY_URL> with your actual values
+RUN echo "[artifactory-baseos]" > /etc/yum.repos.d/artifactory.repo && \
+    echo "name=Artifactory BaseOS" >> /etc/yum.repos.d/artifactory.repo && \
+    echo "baseurl=https://<USERNAME>:<APIKEY>@<ARTIFACTORY_URL>/amazon-linux-2-baseos/" >> /etc/yum.repos.d/artifactory.repo && \
+    echo "enabled=1" >> /etc/yum.repos.d/artifactory.repo && \
+    echo "gpgcheck=0" >> /etc/yum.repos.d/artifactory.repo && \
+    echo "[artifactory-appstream]" >> /etc/yum.repos.d/artifactory.repo && \
+    echo "name=Artifactory AppStream" >> /etc/yum.repos.d/artifactory.repo && \
+    echo "baseurl=https://<USERNAME>:<APIKEY>@<ARTIFACTORY_URL>/amazon-linux-2-appstream/" >> /etc/yum.repos.d/artifactory.repo && \
+    echo "enabled=1" >> /etc/yum.repos.d/artifactory.repo && \
+    echo "gpgcheck=0" >> /etc/yum.repos.d/artifactory.repo
+
+# Clean cache and update metadata
+RUN microdnf clean all && microdnf makecache
+
+# Install packages from Artifactory
+RUN microdnf install -y bash curl vim python3 tar gzip && microdnf clean all
+
+# Optional: Copy Astral from GHCR
+COPY --from=ghcr.io/username/astral:tag /app /app
+
+# Set working directory
+WORKDIR /var/task
+SHELL ["/bin/bash", "-c"]
+CMD ["python3"]
