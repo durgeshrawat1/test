@@ -256,3 +256,134 @@ resource "aws_cognito_user_pool_client" "app_client" {
   logout_urls               = ["https://your-alb-dns-name/logout"]
   supported_identity_providers = ["EntraID"]
 }
+
+
+
+
+
+# AWS region
+variable "region" {
+  type    = string
+  default = "us-east-1"
+}
+
+# VPC and networking
+variable "vpc_id" {
+  type = string
+}
+variable "private_subnet_ids" {
+  type = list(string)
+}
+
+# KMS key (if used for ECS secrets or EFS encryption)
+variable "kms_key_id" {
+  type = string
+}
+
+# ALB
+variable "alb_certificate_arn" {
+  type = string
+}
+
+# ECS
+variable "ecs_cluster_name" {
+  type    = string
+  default = "nextjs-app-cluster"
+}
+variable "ecs_task_cpu" {
+  type    = string
+  default = "512"
+}
+variable "ecs_task_memory" {
+  type    = string
+  default = "1024"
+}
+variable "ecs_container_port" {
+  type    = number
+  default = 3000
+}
+variable "ecs_desired_count" {
+  type    = number
+  default = 1
+}
+
+# ECR image for your app
+variable "ecs_container_image" {
+  type = string
+}
+
+# Cognito
+variable "cognito_user_pool_name" {
+  type    = string
+  default = "nextjs-app-pool"
+}
+variable "cognito_domain_prefix" {
+  type    = string
+  default = "nextjs-app-auth"
+}
+variable "cognito_saml_metadata_file" {
+  type = string
+}
+variable "cognito_callback_urls" {
+  type = list(string)
+}
+variable "cognito_logout_urls" {
+  type = list(string)
+}
+variable "cognito_identity_provider_name" {
+  type    = string
+  default = "EntraID"
+}
+
+
+
+
+# ALB DNS name
+output "alb_dns_name" {
+  description = "Internal ALB DNS name"
+  value       = aws_lb.app_alb.dns_name
+}
+
+# ECS cluster info
+output "ecs_cluster_id" {
+  description = "ECS Cluster ID"
+  value       = aws_ecs_cluster.app_cluster.id
+}
+
+# ECS service info
+output "ecs_service_arn" {
+  description = "ECS Service ARN"
+  value       = aws_ecs_service.app_service.arn
+}
+
+# Cognito domain
+output "cognito_domain" {
+  description = "Cognito domain URL"
+  value       = aws_cognito_user_pool_domain.app_domain.domain
+}
+
+# Cognito user pool ID
+output "cognito_user_pool_id" {
+  description = "Cognito User Pool ID"
+  value       = aws_cognito_user_pool.app_pool.id
+}
+
+# ECS task definition ARN
+output "ecs_task_definition_arn" {
+  description = "ECS Task Definition ARN"
+  value       = aws_ecs_task_definition.app_task.arn
+}
+
+
+
+region                   = "us-east-1"
+vpc_id                   = "vpc-0abc1234def56789"
+private_subnet_ids       = ["subnet-0a1b2c3d4e5f6g7h8", "subnet-1a2b3c4d5e6f7g8h9"]
+kms_key_id               = "arn:aws:kms:us-east-1:123456789:key/xxxxxxxx"
+alb_certificate_arn      = "arn:aws:acm:us-east-1:123456789:certificate/xxxxxxxx"
+ecs_container_image      = "123456789012.dkr.ecr.us-east-1.amazonaws.com/nextjs-app:latest"
+cognito_saml_metadata_file = "entra_metadata.xml"
+cognito_callback_urls    = ["https://internal-alb-dns/"]
+cognito_logout_urls      = ["https://internal-alb-dns/logout"]
+
+
