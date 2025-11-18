@@ -1,0 +1,33 @@
+import { NextResponse } from "next/server";
+import type { NextRequest } from "next/server";
+
+export function middleware(req: NextRequest) {
+  try {
+    // Check for token in Authorization header or ALB header
+    const token =
+      req.headers.get("authorization")?.replace("Bearer ", "") ||
+      req.headers.get("x-amzn-oidc-data");
+
+    if (!token) {
+      // No token found — redirect to home page instead of throwing
+      return NextResponse.redirect(new URL("/", req.url));
+    }
+
+    // Optional: you can add JWT verification here if you want
+    // If verification fails, you can also redirect instead of returning 500
+    // Example:
+    // try { jwtVerify(token, JWKS, { issuer }); } catch { return NextResponse.redirect(new URL("/", req.url)); }
+
+    // If token exists (and optionally verified), allow request to continue
+    return NextResponse.next();
+  } catch (err) {
+    console.error("Middleware error:", err);
+    // On any error, redirect to home instead of showing 500
+    return NextResponse.redirect(new URL("/", req.url));
+  }
+}
+
+// Optional: configure which routes this middleware applies to
+export const config = {
+  matcher: ["/api/:path*", "/protected/:path*"], // example
+};
