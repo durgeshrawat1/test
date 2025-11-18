@@ -1,0 +1,36 @@
+import { NextResponse } from "next/server";
+import { jwtVerify, createRemoteJWKSet } from "jose";
+
+// JWKS URL for your Cognito User Pool
+const JWKS_URL = `https://cognito-idp.${process.env.AWS_REGION}.amazonaws.com/${process.env.COGNITO_USER_POOL_ID}/.well-known/jwks.json`;
+const JWKS = createRemoteJWKSet(new URL(JWKS_URL));
+
+export async function GET(req: Request) {
+  try {
+    // Use ALB header if present, otherwise fallback to MOCK_ALB_TOKEN for local dev
+    const albToken = req.headers.get("x-amzn-oidc-data") || process.env.MOCK_ALB_TOKEN;
+
+    if (!albToken) {
+      return NextResponse.json({ error: "No ALB JWT found" }, { status: 401 });
+    }
+
+    // Verify JWT against Cognito JWKS
+    const { payload } = await jwtVerify(albToken, JWKS, {
+      issuer: `https://cognito-idp.${process.env.AWS_REGION}.amazonaws.com/${process.env.COGNITO_USER_POOL_ID}`,
+    });
+
+    // Extract a username-like claim
+    const username = payload["cognito:username"] || payload["email"] || payload["sub"];
+
+    // Return verified info
+    return NextResponse.json({
+      username,
+      claims: payload,
+      idToken: albToken,
+    });
+
+  } catch (err) {
+    console.error("JWT verification error:", err);
+    return NextResponse.json({ error: "Invalid JWT" }, { status: 401 });
+  }
+}
