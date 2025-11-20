@@ -1,0 +1,12 @@
+import { signIn } from "next-auth/react";
+
+export default function Login() {
+  return (
+    <div style={{ textAlign: "center", marginTop: 100 }}>
+      <h1>Login</h1>
+      <button onClick={() => signIn("cognito")}>
+        Login with Cognito / Entra ID
+      </button>
+    </div>
+  );
+}
