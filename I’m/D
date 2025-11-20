@@ -1,0 +1,99 @@
+npx create-next-app nextjs-cognito-app
+cd nextjs-cognito-app
+
+npm install next-auth
+
+
+index . js
+
+
+import { useSession, signOut } from "next-auth/react";
+
+export default function Home() {
+  const { data: session } = useSession();
+
+  if (!session) return <div>Loading...</div>;
+
+  return (
+    <div style={{ textAlign: "center", marginTop: 50 }}>
+      <h1>Welcome, {session.user?.name}</h1>
+      {session.user?.image && (
+        <img
+          src={session.user.image}
+          alt="Profile"
+          style={{ width: 150, height: 150, borderRadius: "50%" }}
+        />
+      )}
+      <div style={{ marginTop: 20 }}>
+        <button onClick={() => signOut()}>Logout</button>
+      </div>
+    </div>
+  );
+}
+
+
+login.tsx
+
+
+import { signIn } from "next-auth/react";
+
+export default function Login() {
+  return (
+    <div style={{ textAlign: "center", marginTop: 100 }}>
+      <h1>Login</h1>
+      <button onClick={() => signIn("cognito")}>
+        Login with Cognito / Entra ID
+      </button>
+    </div>
+  );
+}
+
+
+...
+import NextAuth from "next-auth";
+import CognitoProvider from "next-auth/providers/cognito";
+
+export default NextAuth({
+  providers: [
+    CognitoProvider({
+      clientId: process.env.COGNITO_CLIENT_ID!,
+      clientSecret: process.env.COGNITO_CLIENT_SECRET!,
+      issuer: process.env.COGNITO_ISSUER_URL!,
+      authorization: { params: { scope: "openid profile email" } },
+    }),
+  ],
+  secret: process.env.NEXTAUTH_SECRET!,
+  callbacks: {
+    async jwt({ token, user }) {
+      if (user) {
+        token.name = user.name;
+        token.email = user.email;
+        token.picture = user.image;
+      }
+      return token;
+    },
+    async session({ session, token }) {
+      session.user = {
+        name: token.name,
+        email: token.email,
+        image: token.picture,
+      };
+      return session;
+    },
+  },
+});
+
+npx create-next-app nextjs-cognito-app
+cd nextjs-cognito-app
+
+npm install next-auth
+
+
+NEXTAUTH_URL=https://<ALB-DNS>        # public URL or DNS for browser access
+NEXTAUTH_SECRET=<random-secret>       # generate via openssl rand -hex 32
+
+COGNITO_CLIENT_ID=<your-cognito-app-client-id>
+COGNITO_CLIENT_SECRET=<your-cognito-app-client-secret>
+COGNITO_ISSUER_URL=https://<your-cognito-domain>  # e.g., https://your-domain.auth.<region>.amazoncognito.com
+
+
