@@ -1,0 +1,88 @@
+nextjs-saml-test/
+├─ pages/
+│  ├─ api/
+│  │  └─ auth/
+│  │     └─ [...nextauth].ts      ← NextAuth API
+│  ├─ index.tsx                   ← Home page
+│  └─ login.tsx                   ← Login page
+├─ package.json
+└─ .env.local
+
+
+page.index.tsx
+
+
+"use client";
+import { useSession, signOut } from "next-auth/react";
+
+export default function HomePage() {
+  const { data: session } = useSession();
+
+  if (!session) return <div>Loading...</div>;
+
+  return (
+    <div style={{ textAlign: "center", marginTop: 50 }}>
+      <h1>Welcome, {session.user?.name}</h1>
+      {session.user?.image && (
+        <img src={session.user.image} alt="Profile" style={{ width: 150, borderRadius: "50%" }} />
+      )}
+      <div style={{ marginTop: 20 }}>
+        <button onClick={() => signOut()}>Logout</button>
+      </div>
+    </div>
+  );
+}
+
+
+pagw/login.tsx
+
+"use client";
+import { signIn } from "next-auth/react";
+
+export default function LoginPage() {
+  return (
+    <div style={{ textAlign: "center", marginTop: 100 }}>
+      <h1>Login</h1>
+      <button onClick={() => signIn("cognito")}>
+        Login via Cognito / Entra ID (SAML)
+      </button>
+    </div>
+  );
+}
+
+
+pagws api auth ..
+import NextAuth from "next-auth";
+import CognitoProvider from "next-auth/providers/cognito";
+
+export default NextAuth({
+  providers: [
+    CognitoProvider({
+      clientId: process.env.COGNITO_CLIENT_ID!,
+      clientSecret: process.env.COGNITO_CLIENT_SECRET!,
+      issuer: process.env.COGNITO_ISSUER_URL!,
+      authorization: { params: { scope: "openid profile email" } },
+    }),
+  ],
+  secret: process.env.NEXTAUTH_SECRET!,
+  callbacks: {
+    async jwt({ token, user }) {
+      if (user) {
+        token.name = user.name;
+        token.email = user.email;
+        token.picture = user.image;
+      }
+      return token;
+    },
+    async session({ session, token }) {
+      session.user = {
+        name: token.name,
+        email: token.email,
+        image: token.picture,
+      };
+      return session;
+    },
+  },
+});
+
+
