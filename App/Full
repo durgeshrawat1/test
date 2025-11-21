@@ -1,0 +1,186 @@
+========================================
+FILE: package.json
+========================================
+{
+  "name": "minimal-saml-cognito",
+  "version": "1.0.0",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start"
+  },
+  "dependencies": {
+    "next": "14.2.3",
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  },
+  "type": "module"
+}
+
+========================================
+FILE: next.config.js
+========================================
+/** @type {import('next').NextConfig} */
+module.exports = {
+  reactStrictMode: true,
+};
+
+========================================
+FILE: .env.local   (place outside /pages)
+========================================
+COGNITO_DOMAIN=https://<your-domain>.auth.<region>.amazoncognito.com
+COGNITO_CLIENT_ID=<your-client-id>
+COGNITO_CLIENT_SECRET=<your-client-secret-if-present>
+COGNITO_REDIRECT_URI=https://your-alb-or-localhost/api/callback
+COGNITO_SAML_IDP=YourSAMLProviderName
+
+========================================
+FILE: lib/decodeJwt.ts
+========================================
+export function decodeJwt(token: string) {
+  const [, payload] = token.split(".");
+  return JSON.parse(Buffer.from(payload, "base64").toString("utf8"));
+}
+
+========================================
+FILE: pages/index.tsx
+========================================
+export default function Home() {
+  return (
+    <div style={{ padding: 40 }}>
+      <h1>Minimal Cognito SAML Login</h1>
+
+      <button
+        onClick={() => {
+          window.location.href = "/api/login";
+        }}
+      >
+        Login With SAML (via Cognito)
+      </button>
+    </div>
+  );
+}
+
+========================================
+FILE: pages/protected.tsx
+========================================
+import { decodeJwt } from "../lib/decodeJwt";
+
+export async function getServerSideProps({ req }: any) {
+  const cookie = req.headers.cookie || "";
+  const match = cookie.match(/id_token=([^;]+)/);
+
+  if (!match) {
+    return {
+      redirect: { destination: "/", permanent: false }
+    };
+  }
+
+  const token = match[1];
+  const user = decodeJwt(token);
+
+  return { props: { user } };
+}
+
+export default function Protected({ user }: any) {
+  return (
+    <div style={{ padding: 40 }}>
+      <h1>Protected Page</h1>
+      <pre>{JSON.stringify(user, null, 2)}</pre>
+    </div>
+  );
+}
+
+========================================
+FILE: pages/api/login.ts
+========================================
+import type { NextApiRequest, NextApiResponse } from "next";
+
+export default function handler(req: NextApiRequest, res: NextApiResponse) {
+  const domain = process.env.COGNITO_DOMAIN!;
+  const clientId = process.env.COGNITO_CLIENT_ID!;
+  const redirectUri = process.env.COGNITO_REDIRECT_URI!;
+  const idp = process.env.COGNITO_SAML_IDP!;
+
+  const url =
+    `${domain}/oauth2/authorize?` +
+    `client_id=${clientId}&` +
+    `response_type=code&` +
+    `redirect_uri=${encodeURIComponent(redirectUri)}&` +
+    `identity_provider=${encodeURIComponent(idp)}`;
+
+  res.redirect(302, url);
+}
+
+========================================
+FILE: pages/api/callback.ts
+========================================
+import type { NextApiRequest, NextApiResponse } from "next";
+import { URLSearchParams } from "url";
+
+export default async function handler(req: NextApiRequest, res: NextApiResponse) {
+  const code = req.query.code as string;
+  if (!code) return res.status(400).send("Missing code");
+
+  const domain = process.env.COGNITO_DOMAIN!;
+  const clientId = process.env.COGNITO_CLIENT_ID!;
+  const clientSecret = process.env.COGNITO_CLIENT_SECRET;
+  const redirectUri = process.env.COGNITO_REDIRECT_URI!;
+
+  const tokenUrl = `${domain}/oauth2/token`;
+
+  const body = new URLSearchParams({
+    grant_type: "authorization_code",
+    code,
+    redirect_uri: redirectUri,
+    client_id: clientId,
+  });
+
+  const headers: Record<string, string> = {
+    "Content-Type": "application/x-www-form-urlencoded",
+  };
+
+  if (clientSecret) {
+    headers["Authorization"] =
+      "Basic " +
+      Buffer.from(`${clientId}:${clientSecret}`).toString("base64");
+  }
+
+  const resp = await fetch(tokenUrl, {
+    method: "POST",
+    headers,
+    body,
+  });
+
+  const tokens = await resp.json();
+
+  res.setHeader(
+    "Set-Cookie",
+    `id_token=${tokens.id_token}; Path=/; HttpOnly; Secure; SameSite=Lax`
+  );
+
+  return res.redirect("/protected");
+}
+
+========================================
+FILE: Dockerfile
+========================================
+FROM node:20-alpine AS builder
+WORKDIR /app
+
+COPY package*.json ./
+RUN npm install
+
+COPY . .
+RUN npm run build
+
+FROM node:20-alpine
+WORKDIR /app
+COPY --from=builder /app ./
+ENV NODE_ENV=production
+EXPOSE 3000
+CMD ["npm", "start"]
+
+========================================
+END OF FULL MINIMAL APP
+========================================
