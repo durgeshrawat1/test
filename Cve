@@ -1,0 +1,8 @@
+During my recent review of our application codebase, I found that we are currently running Next.js version 15.4.1. This version is affected by CVE-2025-66478, a high-severity Remote Code Execution vulnerability in React Server Components.
+
+All Next.js 15.x versions prior to 15.4.8 are vulnerable, and projects using the App Router or server components are directly exposed. The only reliable fix is upgrading to a patched version.
+
+Required action:
+Please update Next.js to version 15.4.8 (or the latest available 15.x) and redeploy all environments once the upgrade is complete.
+
+I’m available to help with the upgrade, testing, or any follow-up steps needed.
