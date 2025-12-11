@@ -33,4 +33,11 @@ openssl req -new -newkey rsa:2048 -nodes \
 
 cat wildcard-example.csr | base64 -w 0
 
-
+{
+  "PolicyDN": "\\VED\\Policy\\Applications\\MyApp\\TLS",
+  "CADN": "\\VED\\Policy\\Certificate Authorities\\My-PrivateCA",
+  "PKCS10": "<base64-of-your-csr-without-headers-or-linebreaks>",
+  "ObjectName": "Wildcard-example",
+  "ManagementType": "Enrollment",
+  "Origin": "API"
+}
