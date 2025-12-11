@@ -1,0 +1,32 @@
+{
+  "PolicyDN": "\\VED\\Policy\\Applications\\MyApp\\TLS",
+  "CertificateDN": "\\VED\\Policy\\Applications\\MyApp\\TLS\\Wildcard-example",
+  "ObjectName": "Wildcard-example",
+
+  "CADN": "\\VED\\Policy\\Certificate Authorities\\My-PrivateCA",
+
+  "Subject": {
+    "CN": "*.example.internal"
+  },
+
+  "SubjectAltNames": [
+    {
+      "Type": "DNS",
+      "Name": "*.example.internal"
+    }
+  ],
+
+  "KeyAlgorithm": "RSA",
+  "KeyBitSize": 2048,
+
+  "ManagementType": "Enrollment",
+  "Origin": "API",
+
+  "ReuseCSR": false,
+  "GenerateCSR": true,
+
+  "IncludeChain": true,
+  "IncludePrivateKey": true,
+  "PrivateKeyPassword": "",
+  "Format": "BASE64"
+}
