@@ -1,0 +1,23 @@
+{
+  "PolicyDN": "\\VED\\Policy\\Applications\\MyApp\\TLS",
+  "CADN": "\\VED\\Policy\\Certificate Authorities\\My-PrivateCA",
+  
+  "Subject": "CN=*.example.internal, O=MyCompany, OU=IT, L=Chicago, ST=IL, C=US",
+
+  "SubjectAltNames": [
+    {
+      "Type": "2",
+      "Name": "*.example.internal"
+    }
+  ],
+
+  "KeyAlgorithm": "RSA",
+  "KeyBitSize": 2048,
+
+  "Format": "Base64",
+  "IncludePrivateKey": true,
+  "Password": "",
+
+  "ManagementType": "Enrollment",
+  "Origin": "API"
+}
