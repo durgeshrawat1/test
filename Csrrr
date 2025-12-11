@@ -21,3 +21,16 @@
   "ManagementType": "Enrollment",
   "Origin": "API"
 }
+
+
+
+openssl req -new -newkey rsa:2048 -nodes \
+  -keyout wildcard-example.key \
+  -out wildcard-example.csr \
+  -subj "/CN=*.example.internal/O=MyCompany/OU=IT/L=Chicago/ST=IL/C=US" \
+  -addext "subjectAltName=DNS:*.example.internal,DNS:example.internal"
+
+
+cat wildcard-example.csr | base64 -w 0
+
+
