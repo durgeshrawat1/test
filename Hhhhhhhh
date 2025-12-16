@@ -1,0 +1,14 @@
+from sqlalchemy import inspect
+
+print("DB login user:", session.execute("SELECT current_user").scalar())
+print("Table being queried:", User.__table__.fullname)
+print("Columns in table:", [c.name for c in User.__table__.columns])
+
+# Fetch the user
+existing_user = session.query(User).filter_by(email=email).first()
+
+if existing_user:
+    print("FOUND user row:", {c.name: getattr(existing_user, c.name) for c in User.__table__.columns})
+    raise Exception("User already exists")
+else:
+    print("No existing user found with email:", email)
