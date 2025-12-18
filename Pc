@@ -1,0 +1,4 @@
+aws cognito-idp admin-set-user-password \
+  --user-pool-id us-east-1_XXXXXXXXX \
+  --username user@example.com \
+  --password 'TempPassword123!' 
