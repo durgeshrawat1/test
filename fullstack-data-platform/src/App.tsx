@@ -44,15 +44,14 @@ function App() {
               <Box sx={{ p: 4 }}>
                 <Box sx={{ display: 'flex', gap: 4, alignItems: 'center', mb: 3, flexWrap: 'wrap' }}>
                   <Box sx={{ flex: 1, minWidth: 280 }}>
-                    <Typography variant="h3" sx={{ fontWeight: 700 }}>Bank Data Hub</Typography>
+                    <Typography variant="h3" sx={{ fontWeight: 700 }}>Bank UDD Platform</Typography>
                     <Typography sx={{ mt: 1, color: 'text.secondary' }}>Securely manage bank datasets, transaction feeds, and reporting schemas.</Typography>
                   </Box>
                   <Box sx={{ display: 'flex', gap: 2, alignItems: 'center' }}>
                     <Box>
                       <Typography variant="subtitle2">Quick actions</Typography>
                       <Box sx={{ display: 'flex', gap: 1, mt: 1 }}>
-                        <Button variant="contained" color="primary" onClick={() => window.location.href = '/admin'}>Admin Console</Button>
-                        <Button variant="outlined" onClick={() => window.location.href = '/data/import'}>Import CSV</Button>
+                        <Button variant="contained" color="primary" onClick={() => window.location.href = '/data'}>Explore Datasets</Button>
                         <Button variant="outlined" onClick={() => window.location.reload()}>Refresh</Button>
                       </Box>
                     </Box>

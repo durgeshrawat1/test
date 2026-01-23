@@ -62,9 +62,9 @@ export const Layout: React.FC = () => {
       <AppBar position="fixed" sx={{ zIndex: (theme) => theme.zIndex.drawer + 1 }}>
         <Toolbar sx={{ justifyContent: 'space-between' }}>
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-            <img src="/logo-bank.svg" className="logo" alt="Bank Data Hub" style={{ height: 32, marginRight: 8 }} />
+            <img src="/logo-bank.svg" className="logo" alt="Bank UDD Platform" style={{ height: 32, marginRight: 8 }} />
             <Typography variant="h6" noWrap component="div">
-              Bank Data Hub
+              Bank UDD Platform
             </Typography>
           </Box>
           
@@ -92,13 +92,19 @@ export const Layout: React.FC = () => {
               MenuListProps={{ onMouseLeave: () => setAnchorEl(null) }}
             >
               <MenuItem onClick={() => { setAnchorEl(null); navigate('/profile'); }}>
-                <ListItemIcon><Person fontSize="small" /></ListItemIcon>
-                <ListItemText>Profile</ListItemText>
-              </MenuItem>
-              <MenuItem onClick={() => { setAnchorEl(null); logout(); }}>
-                <ListItemIcon><ExitToApp fontSize="small" /></ListItemIcon>
-                <ListItemText>Logout</ListItemText>
-              </MenuItem>
+                  <ListItemIcon><Person fontSize="small" /></ListItemIcon>
+                  <ListItemText>Profile</ListItemText>
+                </MenuItem>
+                {isAdmin && (
+                  <MenuItem onClick={() => { setAnchorEl(null); navigate('/admin'); }}>
+                    <ListItemIcon><AdminPanelSettings fontSize="small" /></ListItemIcon>
+                    <ListItemText>Admin Console</ListItemText>
+                  </MenuItem>
+                )}
+                <MenuItem onClick={() => { setAnchorEl(null); logout(); }}>
+                  <ListItemIcon><ExitToApp fontSize="small" /></ListItemIcon>
+                  <ListItemText>Logout</ListItemText>
+                </MenuItem>
             </Menu>
           </Box>
         </Toolbar>
@@ -161,19 +167,8 @@ export const Layout: React.FC = () => {
               </ListItem>
             )}
 
-            {/* Admin Console - always visible but disabled unless user is admin */}
+            {/* Admin Console moved into the user avatar menu for Admin users */}
             <Divider sx={{ my: 1 }} />
-            <ListItem disablePadding>
-              <ListItemButton
-                selected={location.pathname === '/admin'}
-                onClick={() => { if (isAdmin) navigate('/admin'); }}
-                disabled={!isAdmin}
-                sx={{ opacity: isAdmin ? 1 : 0.5 }}
-              >
-                <ListItemIcon><AdminPanelSettings color="primary" /></ListItemIcon>
-                <ListItemText primary="Admin Console" sx={{ color: isAdmin ? 'primary.main' : 'text.disabled', fontWeight: 'bold' }} />
-              </ListItemButton>
-            </ListItem>
           </List>
         </Box>
       </Drawer>

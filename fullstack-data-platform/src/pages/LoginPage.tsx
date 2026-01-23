@@ -17,7 +17,7 @@ export const LoginPage: React.FC = () => {
     <Container maxWidth="sm">
       <Box sx={{ mt: 10, textAlign: 'center' }}>
         <Paper elevation={3} sx={{ p: 4 }}>
-          <Typography variant="h4" gutterBottom>Bank Data Hub</Typography>
+          <Typography variant="h4" gutterBottom>Bank UDD Platform</Typography>
           <Typography variant="body1" sx={{ mb: 3 }}>
             Sign in with your corporate SSO to manage datasets and feeds securely.
           </Typography>

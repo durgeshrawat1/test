@@ -1,7 +1,8 @@
 :root {
-  --brand-primary: #165a9c;
-  --brand-accent: #2b8cc4;
-  --page-bg: #f4f6f8;
+  /* Updated palette to a refined bank-friendly appearance */
+  --brand-primary: #3b2160; /* deep purple */
+  --brand-accent: #7a3fb0;  /* violet accent */
+  --page-bg: #f5f7fb;
 }
 
 #root {
@@ -49,4 +50,39 @@
 
 body {
   background: var(--page-bg);
+  font-family: Inter, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial;
+  color: #122034;
+}
+
+/* Accent styles to align with the brand palette */
+.logo {
+  filter: none;
+}
+
+.MuiButton-containedPrimary {
+  background: linear-gradient(90deg, var(--brand-primary), var(--brand-accent));
+  color: #fff;
+}
+
+.MuiAppBar-root {
+  background: linear-gradient(90deg, rgba(59,33,96,0.95), rgba(122,63,176,0.95));
+}
+
+/* Dark mode: swap logo and tweak appbar/background for dark UIs */
+@media (prefers-color-scheme: dark) {
+  body {
+    background: #07101a;
+    color: #e6eefc;
+  }
+  .logo {
+    /* replace with dark SVG when user prefers dark scheme */
+    content: url('/logo-bank-dark.svg');
+    filter: none;
+  }
+  .MuiAppBar-root {
+    background: linear-gradient(90deg, rgba(6,12,24,0.95), rgba(20,28,48,0.95));
+  }
+  .MuiButton-containedPrimary {
+    background: linear-gradient(90deg, #2b1b45, #68308f);
+  }
 }

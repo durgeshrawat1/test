@@ -3,10 +3,9 @@ import {
   Box, Paper, Typography, Table, TableBody, TableCell, TableContainer, TableHead, TableRow,
   Button, Toolbar, IconButton, Dialog, DialogTitle, DialogContent, TextField, DialogActions,
   Stack, MenuItem, Select, FormControl, InputLabel, CircularProgress, Autocomplete
-} from '@mui/material';
+  , Tooltip } from '@mui/material';
 import { Add, Refresh, UploadFile, FilterList, Edit, Save, Cancel } from '@mui/icons-material';
-import { FixedSizeList as VirtualList } from 'react-window';
-import type { ListChildComponentProps } from 'react-window';
+// removed react-window virtualization (rendering uses plain rows)
 // Note: papaparse not required now; CSV handled by backend endpoints
 import { useParams } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
@@ -75,12 +74,41 @@ export const DataGridPage: React.FC = () => {
     return () => clearTimeout(t);
   }, [groupQuery]);
 
+  // --- 2. FETCH AVAILABLE SCHEMAS WHEN A GROUP IS SELECTED ---
+  useEffect(() => {
+    let mounted = true;
+    const fetchSchemas = async () => {
+      if (!selectedGroup) { setAvailableSchemas([]); return; }
+      try {
+        const token = (window as any).__ALB_JWT__ || localStorage.getItem('ALB_JWT') || undefined;
+        const headers: Record<string, string> = {};
+        if (token) headers['Authorization'] = `Bearer ${token}`;
+        const res = await fetch(`${CONFIG.API_BASE_URL}/metadata/tables?group=${encodeURIComponent(selectedGroup)}&limit=200&offset=0`, { headers, credentials: 'include' });
+        if (!mounted) return;
+        if (res.ok) {
+          const payload = await res.json();
+          setAvailableSchemas(payload.items || []);
+        } else {
+          setAvailableSchemas([]);
+        }
+      } catch (err) {
+        console.error('Failed to fetch schemas for group', err);
+        setAvailableSchemas([]);
+      }
+    };
+    fetchSchemas();
+    return () => { mounted = false; };
+  }, [selectedGroup]);
+
   // --- 3. FETCH DATA ROWS ---
   const fetchData = async (pageParam = page, size = rowsPerPage) => {
     if (!selectedSchemaId) return;
     setLoading(true);
     try {
-      const res = await fetch(`${CONFIG.API_BASE_URL}/data/${selectedSchemaId}?limit=${size}&offset=${pageParam * size}`);
+      const token = (window as any).__ALB_JWT__ || localStorage.getItem('ALB_JWT') || undefined;
+      const headers: Record<string, string> = {};
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+      const res = await fetch(`${CONFIG.API_BASE_URL}/data/${selectedSchemaId}?limit=${size}&offset=${pageParam * size}`, { headers, credentials: 'include' });
       if (res.ok) {
         const payload = await res.json();
         setData(payload.rows || []);
@@ -104,7 +132,10 @@ export const DataGridPage: React.FC = () => {
     const fetchColumns = async () => {
       if (!selectedSchemaId) return;
       try {
-        const res = await fetch(`${CONFIG.API_BASE_URL}/schemas/${selectedSchemaId}/columns`);
+        const token = (window as any).__ALB_JWT__ || localStorage.getItem('ALB_JWT') || undefined;
+        const headers: Record<string, string> = {};
+        if (token) headers['Authorization'] = `Bearer ${token}`;
+        const res = await fetch(`${CONFIG.API_BASE_URL}/schemas/${selectedSchemaId}/columns`, { headers, credentials: 'include' });
         if (res.ok) {
           const cols = await res.json();
           setColumnsMeta(cols);
@@ -118,6 +149,11 @@ export const DataGridPage: React.FC = () => {
     };
     fetchColumns();
   }, [selectedSchemaId]);
+
+  // Column names derived from metadata (if available) or data keys
+  const columnNames: string[] = (columnsMeta && columnsMeta.length > 0)
+    ? columnsMeta.map((c: any) => c.column_name)
+    : (data && data.length > 0 ? Object.keys(data[0]) : []);
 
   // --- 4. DATA MODIFICATION ---
   const handleManualAdd = async () => {
@@ -152,10 +188,14 @@ export const DataGridPage: React.FC = () => {
         }
       }
 
+      const token = (window as any).__ALB_JWT__ || localStorage.getItem('ALB_JWT') || undefined;
+      const headers: Record<string,string> = { 'Content-Type': 'application/json' };
+      if (token) headers['Authorization'] = `Bearer ${token}`;
       const res = await fetch(`${CONFIG.API_BASE_URL}/data/${selectedSchemaId}`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ data: newRecord })
+        headers,
+        body: JSON.stringify({ data: newRecord }),
+        credentials: 'include'
       });
       if (res.ok) {
         setOpen(false);
@@ -185,10 +225,14 @@ export const DataGridPage: React.FC = () => {
   const handleSaveEdit = async () => {
     if (!editingId || !selectedSchemaId) return;
     try {
+      const token = (window as any).__ALB_JWT__ || localStorage.getItem('ALB_JWT') || undefined;
+      const headers: Record<string,string> = { 'Content-Type': 'application/json' };
+      if (token) headers['Authorization'] = `Bearer ${token}`;
       const res = await fetch(`${CONFIG.API_BASE_URL}/data/${selectedSchemaId}/${editingId}`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ data: editValues })
+        headers,
+        body: JSON.stringify({ data: editValues }),
+        credentials: 'include'
       });
 
       if (res.ok) {
@@ -196,11 +240,12 @@ export const DataGridPage: React.FC = () => {
         setEditValues({});
         fetchData(); // Refresh to see confirmed backend data
       } else {
-        alert("Failed to update record");
+        const txt = await res.text();
+        alert('Failed to update record: ' + txt);
       }
     } catch (e) {
       console.error("Update failed", e);
-      alert("Error connecting to server");
+      alert("Error connecting to server: " + String(e));
     }
   };
 
@@ -294,10 +339,25 @@ export const DataGridPage: React.FC = () => {
                   const file = e.target.files && e.target.files[0];
                   if (!file || !selectedSchemaId) return;
                   try {
+                    // quick client-side header validation (case-insensitive)
+                    const text = await file.text();
+                    const firstLine = text.split(/\r?\n/)[0] || '';
+                    const csvHeaders = firstLine.split(',').map(h => h.replace(/^\uFEFF/, '').trim().replace(/^"|"$/g, '').toLowerCase()).filter(Boolean);
+                    const expected = columnNames.map(c => String(c).toLowerCase());
+                    const matches = csvHeaders.filter(h => expected.includes(h));
+                    if (matches.length === 0) {
+                      alert('CSV headers do not match expected columns. Expected one or more of: ' + columnNames.join(', '));
+                      (e.target as HTMLInputElement).value = '';
+                      return;
+                    }
+
                     const form = new FormData();
-                    form.append('file', file);
+                    form.append('file', new Blob([text], { type: 'text/csv' }), file.name);
+                    const token = (window as any).__ALB_JWT__ || localStorage.getItem('ALB_JWT') || undefined;
+                    const authHeaders: Record<string,string> = {};
+                    if (token) authHeaders['Authorization'] = `Bearer ${token}`;
                     const res = await fetch(`${CONFIG.API_BASE_URL}/data/${selectedSchemaId}/import-csv`, {
-                      method: 'POST', body: form
+                      method: 'POST', body: form, headers: authHeaders, credentials: 'include'
                     });
                     if (res.ok) {
                       const out = await res.json();
@@ -317,7 +377,10 @@ export const DataGridPage: React.FC = () => {
               </Button>
               <Button variant="outlined" startIcon={<FilterList />} onClick={async () => {
                 if (!selectedSchemaId) return; try {
-                  const res = await fetch(`${CONFIG.API_BASE_URL}/data/${selectedSchemaId}/export-csv`, { method: 'GET' });
+                  const token = (window as any).__ALB_JWT__ || localStorage.getItem('ALB_JWT') || undefined;
+                  const authHeaders: Record<string,string> = {};
+                  if (token) authHeaders['Authorization'] = `Bearer ${token}`;
+                  const res = await fetch(`${CONFIG.API_BASE_URL}/data/${selectedSchemaId}/export-csv?all=true`, { method: 'GET', headers: authHeaders, credentials: 'include' });
                   if (!res.ok) { alert('Export failed: ' + (await res.text())); return; }
                   const blob = await res.blob();
                   const url = window.URL.createObjectURL(blob);
@@ -334,7 +397,7 @@ export const DataGridPage: React.FC = () => {
             </Stack>
           </Paper>
 
-          <TableContainer component={Paper} sx={{ boxShadow: 3, position: 'relative' }}>
+          <TableContainer component={Paper} sx={{ boxShadow: 3, position: 'relative', overflowX: 'auto' }}>
             {loading && (
               <Box sx={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, display: 'flex', justifyContent: 'center', alignItems: 'center', bgcolor: 'rgba(255,255,255,0.7)', zIndex: 2 }}>
                 <CircularProgress />
@@ -344,66 +407,61 @@ export const DataGridPage: React.FC = () => {
               <Typography variant="subtitle2" color="text.secondary">{data.length} Records Found</Typography>
               <IconButton onClick={() => fetchData(page, rowsPerPage)}><Refresh /></IconButton>
             </Toolbar>
-            <Table stickyHeader>
+            <Table stickyHeader sx={{ tableLayout: 'fixed', width: '100%' }}>
               <TableHead>
                   <TableRow>
-                    { (data.length > 0 || columnsMeta.length > 0) ? (
-                      <>
-                        <TableCell sx={{ bgcolor: '#f5f5f5', fontWeight: 'bold' }}>ACTIONS</TableCell>
-                        {(columnsMeta.length > 0 ? columnsMeta.map(c => c.column_name) : (data.length>0 ? Object.keys(data[0]) : [])).map(k => (
-                          <TableCell key={k} sx={{ bgcolor: '#f5f5f5', fontWeight: 'bold' }}>{k.toUpperCase()}</TableCell>
-                        ))}
-                      </>
-                    ) : <TableCell>No data available in this table.</TableCell>}
+                    { (data.length > 0 || columnNames.length > 0) ? (
+                            <>
+                              <TableCell sx={{ bgcolor: '#f5f5f5', fontWeight: 'bold', width: 88, minWidth: 88, whiteSpace: 'nowrap', position: 'sticky', left: 0, zIndex: 3 }}>
+                                <Tooltip title="Row actions">
+                                  <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100%' }}>
+                                    <Edit fontSize="small" />
+                                  </Box>
+                                </Tooltip>
+                              </TableCell>
+                              {columnNames.map(k => (
+                                <TableCell key={k} sx={{ bgcolor: '#f5f5f5', fontWeight: 'bold', minWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{k.toUpperCase()}</TableCell>
+                              ))}
+                            </>
+                          ) : <TableCell>No data available in this table.</TableCell>}
                   </TableRow>
                 </TableHead>
               <TableBody>
                 {data.length > 0 && (
-                  <VirtualList
-                    height={400}
-                    itemCount={data.length}
-                    itemSize={52}
-                    width="100%"
-                  >
-                    {({ index, style }: ListChildComponentProps) => {
-                      const row = data[index];
-                      const columns = data.length > 0 ? Object.keys(data[0]) : [];
-                      return (
-                        <TableRow key={index} hover selected={editingId === row.id} style={style}>
-                          <TableCell>
-                            {editingId === row.id ? (
-                              <Stack direction="row" spacing={1}>
-                                <IconButton size="small" color="primary" onClick={handleSaveEdit}><Save /></IconButton>
-                                <IconButton size="small" color="error" onClick={handleCancelEdit}><Cancel /></IconButton>
-                              </Stack>
+                  data.map((row, index) => (
+                    <TableRow key={index} hover selected={editingId === row.id}>
+                      <TableCell sx={{ width: 88, minWidth: 88, whiteSpace: 'nowrap', position: 'sticky', left: 0, zIndex: 1, bgcolor: '#ffffff', display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
+                        {editingId === row.id ? (
+                          <Stack direction="row" spacing={1}>
+                            <Tooltip title="Save"><IconButton size="small" color="primary" onClick={handleSaveEdit}><Save /></IconButton></Tooltip>
+                            <Tooltip title="Cancel"><IconButton size="small" color="error" onClick={handleCancelEdit}><Cancel /></IconButton></Tooltip>
+                          </Stack>
+                        ) : (
+                          <Tooltip title="Edit row"><IconButton size="small" onClick={() => handleEditClick(row)}><Edit /></IconButton></Tooltip>
+                        )}
+                      </TableCell>
+
+                      {columnNames.map((key, j) => {
+                        const val = (row as any)[key];
+                        const isId = key === 'id';
+                        const isEditing = editingId === row.id && !isId;
+                        return (
+                          <TableCell key={j}>
+                            {isEditing ? (
+                              <TextField
+                                size="small"
+                                value={(editValues as any)[key] || ''}
+                                onChange={(e) => setEditValues({ ...editValues, [key]: e.target.value })}
+                                sx={{ '& .MuiInputBase-input': { py: 0.5, px: 1, fontSize: '0.875rem' } }}
+                              />
                             ) : (
-                              <IconButton size="small" onClick={() => handleEditClick(row)}><Edit /></IconButton>
+                              val !== null && val !== undefined ? String(val) : '-'
                             )}
                           </TableCell>
-
-                          {columns.map((key, j) => {
-                            const val = row[key];
-                            const isId = key === 'id';
-                            const isEditing = editingId === row.id && !isId;
-                            return (
-                              <TableCell key={j}>
-                                {isEditing ? (
-                                  <TextField
-                                    size="small"
-                                    value={editValues[key] || ''}
-                                    onChange={(e) => setEditValues({ ...editValues, [key]: e.target.value })}
-                                    sx={{ '& .MuiInputBase-input': { py: 0.5, px: 1, fontSize: '0.875rem' } }}
-                                  />
-                                ) : (
-                                  val !== null ? String(val) : '-'
-                                )}
-                              </TableCell>
-                            );
-                          })}
-                        </TableRow>
-                      );
-                    }}
-                  </VirtualList>
+                        );
+                      })}
+                    </TableRow>
+                  ))
                 )}
               </TableBody>
             </Table>

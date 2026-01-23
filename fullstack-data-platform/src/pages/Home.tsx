@@ -10,7 +10,7 @@ export const Home: React.FC = () => {
     <Container maxWidth="md">
       <Box sx={{ mt: 8, textAlign: 'center' }}>
         <Typography variant="h2" gutterBottom>
-          Bank Data Hub
+          Bank UDD Platform
         </Typography>
         <Typography variant="h5" color="text.secondary" paragraph>
           Centralized management for bank datasets, transaction feeds, and schema governance.
@@ -21,9 +21,8 @@ export const Home: React.FC = () => {
             Use the sidebar to select a dataset or feed. Import transaction CSVs, review schema versions, and export data for reporting.
           </Typography>
 
-          <Box sx={{ display: 'flex', gap: 2, mt: 2 }}>
-            <Button variant="contained" size="large" onClick={() => navigate('/data/import')}>Import CSV</Button>
-            <Button variant="outlined" size="large" onClick={() => navigate('/admin')}>Admin Console</Button>
+          <Box sx={{ display: 'flex', gap: 2, mt: 2, justifyContent: 'center' }}>
+            <Button variant="contained" size="large" onClick={() => navigate('/data')}>Explore Datasets</Button>
           </Box>
         </Paper>
       </Box>

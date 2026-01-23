@@ -22,10 +22,19 @@ async def get_current_user(x_amzn_oidc_data: Optional[str] = Header(None)) -> Di
         payload_part = x_amzn_oidc_data.split('.')[1]
         padded = payload_part + '=' * (4 - len(payload_part) % 4)
         data = json.loads(base64.urlsafe_b64decode(padded))
-        
+
+        # DEBUG: log decoded payload keys and the groups claim so we can inspect incoming tokens
+        try:
+            logger.info(f"Decoded token payload keys: {list(data.keys())}")
+            logger.info(f"cognito:groups payload: {data.get('cognito:groups')}")
+        except Exception:
+            logger.debug('Failed to log token payload details')
+
+        # Decode Cognito groups only (production expectation)
         raw_groups = data.get("cognito:groups", [])
-        if isinstance(raw_groups, str): raw_groups = [raw_groups]
-        
+        if isinstance(raw_groups, str):
+            raw_groups = [raw_groups]
+
         return {
             "name": data.get("username", "Unknown"),
             "email": data.get("email", ""),

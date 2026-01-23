@@ -14,6 +14,8 @@ from pydantic import BaseModel, validator
 from typing import List, Dict, Any
 import csv
 import io
+import datetime
+import decimal
 from fastapi import UploadFile, File
 from fastapi.responses import Response
 
@@ -177,41 +179,172 @@ def decode_jwt(token):
         return {}
 
 async def get_current_user(request: Request):
+    # Read primary ALB headers and Authorization header first (backwards-compatible)
     h_data = request.headers.get('x-amzn-oidc-data')
     h_access = request.headers.get('x-amzn-oidc-accesstoken')
-    
-    claims = {}
-    if h_data: claims.update(decode_jwt(h_data))
-    if h_access: claims.update(decode_jwt(h_access))
-    
+    h_auth = request.headers.get('authorization')
+
+    claims: Dict[str, Any] = {}
+
+    # Try the common headers first
+    if h_data:
+        claims.update(decode_jwt(h_data))
+    if h_access:
+        claims.update(decode_jwt(h_access))
+    # Support Authorization: Bearer <token> from frontends or proxies
+    if h_auth and isinstance(h_auth, str) and h_auth.lower().startswith('bearer '):
+        try:
+            token = h_auth.split(None, 1)[1]
+            claims.update(decode_jwt(token))
+        except Exception:
+            logger.debug('Failed to decode Authorization bearer token')
+
+    # Additionally scan all headers for any OIDC/JWT-like payloads that may contain groups
+    # This helps cover ALB/Proxy variations which may forward different header names.
+    scanned = []
+    # Keywords to identify headers that may contain tokens/claims
+    header_keywords = ('x-amzn-oidc', 'oidc', 'idtoken', 'accesstoken', 'jwt', 'cognito', 'x-user', 'x-auth')
+    for name, val in request.headers.items():
+        lname = name.lower()
+        # skip Authorization (already handled) and obvious non-token headers
+        if lname == 'authorization':
+            continue
+        if not any(k in lname for k in header_keywords):
+            continue
+
+        if not val:
+            continue
+
+        # Try splitting header values into candidate tokens (space/comma/semicolon separated)
+        parts = re.split(r'[\s,;]+', val)
+        for part in parts:
+            if not part:
+                continue
+            # If looks like a JWT (has two dots) attempt to decode
+            if part.count('.') >= 2:
+                try:
+                    d = decode_jwt(part)
+                    if d:
+                        claims.update(d)
+                        scanned.append(name)
+                        # continue to next header
+                        break
+                except Exception:
+                    pass
+            else:
+                # Otherwise try to decode as base64-encoded JSON block
+                try:
+                    padded = part + '=' * (-len(part) % 4)
+                    maybe_json = json.loads(base64.urlsafe_b64decode(padded))
+                    if isinstance(maybe_json, dict):
+                        claims.update(maybe_json)
+                        scanned.append(name)
+                        break
+                except Exception:
+                    # not base64/json - skip
+                    pass
+
     if not claims:
-        logger.warning("No claims found in ALB headers")
-        # In production, require real authentication claims. Do not return a fake
-        # developer user from environment variables.
+        logger.warning("No claims found in ALB headers after scanning all OIDC-like headers")
+        # In production, require real authentication claims.
         raise HTTPException(status_code=401)
-    
+
     email = claims.get('email') or claims.get('upn') or claims.get('username') or 'unknown'
-    # Support multiple possible claim names including custom.groups used by Entra/Cognito
+
+    # Collect groups from any common claim keys
     groups = (
         claims.get('cognito:groups')
         or claims.get('groups')
         or claims.get('roles')
         or claims.get('custom.groups')
         or claims.get('custom:groups')
+        or claims.get('group')
         or []
     )
     # Normalize string/list formats and split comma/semicolon-separated strings
     if isinstance(groups, str):
         groups = [g.strip() for g in re.split(r'[;,]', groups) if g.strip()]
-    
-    logger.info(f"User {email} groups resolved: {groups}")
-    
+
+    # If scanning merged additional claim sources, try to pick up groups from nested structures
+    if not groups:
+        # Some providers include groups under a nested claim like 'realm_access': { 'roles': [...] }
+        ra = claims.get('realm_access')
+        if isinstance(ra, dict):
+            rroles = ra.get('roles')
+            if isinstance(rroles, list):
+                groups = rroles
+
+    # Ensure groups is a list of trimmed strings
+    try:
+        groups = [str(g).strip() for g in (groups or []) if g is not None]
+    except Exception:
+        groups = []
+
+    logger.info(f"User {email} groups resolved: {groups} (scanned headers: {scanned})")
+
     return {
-        "id": claims.get('sub') or claims.get('oid'), 
-        "email": email, 
-        "name": email.split('@')[0].capitalize(), 
-        "groups": groups 
+        "id": claims.get('sub') or claims.get('oid'),
+        "email": email,
+        "name": email.split('@')[0].capitalize(),
+        "groups": groups
     }
+
+
+def _parse_datetime_string(s: Any) -> datetime.datetime:
+    """Parse a wide range of datetime string formats into a datetime object.
+    Accepts datetime/date objects and numeric epoch seconds as well.
+    Raises ValueError on failure.
+    """
+    if s is None:
+        raise ValueError('None is not a datetime')
+    if isinstance(s, datetime.datetime):
+        return s
+    if isinstance(s, datetime.date) and not isinstance(s, datetime.datetime):
+        return datetime.datetime.combine(s, datetime.time.min)
+
+    st = str(s).strip()
+    # common trailing Z (UTC) -> make ISO compatible for fromisoformat
+    if st.endswith('Z'):
+        st = st[:-1] + '+00:00'
+
+    # Try fromisoformat first (fast path)
+    try:
+        return datetime.datetime.fromisoformat(st)
+    except Exception:
+        pass
+
+    # Try a set of common formats (with and without fractional seconds)
+    fmts = (
+        '%Y-%m-%d %H:%M:%S',
+        '%Y-%m-%dT%H:%M:%S',
+        '%Y-%m-%d %H:%M:%S.%f',
+        '%Y-%m-%dT%H:%M:%S.%f',
+        '%Y-%m-%d',
+        '%Y/%m/%d %H:%M:%S',
+        '%d-%m-%Y %H:%M:%S',
+    )
+    for f in fmts:
+        try:
+            dt = datetime.datetime.strptime(st, f)
+            return dt
+        except Exception:
+            continue
+
+    # Try parsing as epoch seconds
+    try:
+        if re.match(r'^\d{10}(?:\.\d+)?$', st):
+            return datetime.datetime.fromtimestamp(float(st))
+    except Exception:
+        pass
+
+    # As a last resort, try dateutil if available (optional dependency)
+    try:
+        from dateutil import parser as _dparser
+        return _dparser.parse(st)
+    except Exception:
+        pass
+
+    raise ValueError('invalid datetime format')
 
 
 def _validate_and_coerce_row(row: Dict[str, Any], cols: Dict[str, Dict[str, Any]], *, enforce_required: bool = True):
@@ -240,15 +373,47 @@ def _validate_and_coerce_row(row: Dict[str, Any], cols: Dict[str, Dict[str, Any]
             raise HTTPException(status_code=400, detail=f"{k} is required")
 
         if v is not None:
-            dt = meta_col.get('data_type')
+            # Normalize data_type and allow substring matches for Postgres variants
+            raw_dt = meta_col.get('data_type')
+            dt = (raw_dt or '').lower()
+            # Fallback heuristics when data_type is missing or appears textual:
+            # treat *_at and fields containing 'date' as timestamps/dates so they get coerced.
+            if not dt or any(tok in dt for tok in ('text', 'string', 'char', 'varchar')):
+                if k.endswith('_at') or 'date' in k:
+                    dt = 'timestamp'
             try:
-                if dt == 'int':
+                if dt == 'int' or dt.startswith('int'):
                     params[k] = int(v)
-                elif dt == 'float':
+                elif dt == 'float' or dt.startswith('float') or dt.startswith('numeric') or dt.startswith('decimal'):
                     params[k] = float(v)
-                elif dt in ('text', 'string'):
+                elif dt in ('text', 'string') or dt.startswith('varchar') or dt.startswith('char'):
                     params[k] = str(v)
-                elif dt == 'bool':
+                elif 'timestamp' in dt or 'datetime' in dt or 'timestamptz' in dt:
+                    # Accept ISO formats and common SQL datetimes like 'YYYY-MM-DD HH:MM:SS'
+                    try:
+                        parsed = _parse_datetime_string(v)
+                        params[k] = parsed
+                    except HTTPException:
+                        raise
+                    except Exception as e:
+                        raise ValueError(f'invalid datetime format: {e}')
+                elif 'date' == dt or (('date' in dt) and ('timestamp' not in dt)):
+                    if isinstance(v, datetime.date) and not isinstance(v, datetime.datetime):
+                        params[k] = v
+                    else:
+                        s = str(v)
+                        parsed = None
+                        try:
+                            parsed = datetime.date.fromisoformat(s)
+                        except Exception:
+                            try:
+                                parsed = datetime.datetime.strptime(s, '%Y-%m-%d').date()
+                            except Exception:
+                                parsed = None
+                        if parsed is None:
+                            raise ValueError('invalid date format')
+                        params[k] = parsed
+                elif dt == 'bool' or dt.startswith('bool'):
                     if isinstance(v, bool):
                         params[k] = v
                     elif str(v).lower() in ('true', '1', 'yes'):
@@ -259,8 +424,11 @@ def _validate_and_coerce_row(row: Dict[str, Any], cols: Dict[str, Dict[str, Any]
                         raise ValueError('invalid boolean')
                 else:
                     params[k] = str(v)
-            except Exception:
-                raise HTTPException(status_code=400, detail=f"{k} has invalid type for {meta_col.get('data_type')}")
+            except HTTPException:
+                raise
+            except Exception as ex:
+                logger.error(f"Coercion failed for column '{k}' expected '{meta_col.get('data_type')}' value '{v}': {ex}")
+                raise HTTPException(status_code=400, detail=f"{k} has invalid type for {meta_col.get('data_type')}: {ex}")
 
             # additional validations
             if meta_col.get('validation') == 'full_name' and re.search(r'\d', str(v)):
@@ -283,10 +451,27 @@ def _validate_and_coerce_row(row: Dict[str, Any], cols: Dict[str, Dict[str, Any]
 async def health():
     return {"status": "ok"}
 
+
+@app.get("/api/auth/me")
+async def auth_me(request: Request):
+    """Return the current authenticated user info derived from ALB/Cognito headers.
+    This is a lightweight endpoint used by the frontend to detect session and groups.
+    """
+    try:
+        user = await get_current_user(request)
+        return {"user": user}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"auth_me error: {e}")
+        raise HTTPException(status_code=500, detail="Internal error")
+
 @app.get("/api/schemas")
 async def get_schemas(db: AsyncSession = Depends(get_db), user=Depends(get_current_user)):
     try:
         u_groups = user.get('groups', [])
+        # normalized lower-case set for case-insensitive comparisons
+        u_groups_l = set([str(g).strip().lower() for g in u_groups if g])
         is_admin = any(str(g).upper() == "ADMIN" for g in u_groups)
 
         sql = f"SELECT id, name, description, access_group, physical_table_name FROM {meta_table('schemas')}"
@@ -301,7 +486,7 @@ async def get_schemas(db: AsyncSession = Depends(get_db), user=Depends(get_curre
                 "accessGroup": r.access_group,
                 "physical_table_name": r.physical_table_name,
             }
-            for r in rows if is_admin or r.access_group in u_groups
+            for r in rows if is_admin or (isinstance(r.access_group, str) and r.access_group.strip().lower() in u_groups_l)
         ]
     except Exception as e:
         logger.error(f"DATABASE CRASH in get_schemas: {traceback.format_exc()}")
@@ -336,7 +521,8 @@ async def get_data(schema_id: int, limit: int = 25, offset: int = 0, db: AsyncSe
 
         # Permission check
         u_groups = user.get('groups', [])
-        if not any(str(g).upper() == "ADMIN" for g in u_groups) and meta.access_group not in u_groups:
+        u_groups_l = set([str(g).strip().lower() for g in u_groups if g])
+        if not any(str(g).upper() == "ADMIN" for g in u_groups) and not (isinstance(meta.access_group, str) and meta.access_group.strip().lower() in u_groups_l):
             raise HTTPException(status_code=403)
 
         phys = phys_table(meta.physical_table_name)
@@ -370,7 +556,8 @@ async def add_record(schema_id: int, req: CreateRecordRequest, db: AsyncSession 
 
     # Permission check
     u_groups = user.get('groups', [])
-    if not any(str(g).upper() == "ADMIN" for g in u_groups) and meta.access_group not in u_groups:
+    u_groups_l = set([str(g).strip().lower() for g in u_groups if g])
+    if not any(str(g).upper() == "ADMIN" for g in u_groups) and not (isinstance(meta.access_group, str) and meta.access_group.strip().lower() in u_groups_l):
         logger.warning(f"add_record: user {user.get('email')} unauthorized for schema {schema_id} (group {meta.access_group})")
         raise HTTPException(status_code=403, detail="Unauthorized")
 
@@ -476,25 +663,64 @@ async def import_csv(schema_id: int, file: UploadFile = File(...), db: AsyncSess
         # Get columns metadata (name, data_type, required, validation)
         colres = await db.execute(text(f"SELECT column_name, data_type, required, validation FROM {meta_table('table_columns')} WHERE schema_id = :id"), {"id": schema_id})
         cols = {r.column_name: {"data_type": r.data_type, "required": r.required, "validation": r.validation} for r in colres.fetchall()}
+        logger.info(f"Import CSV schema columns for schema_id={schema_id}: {cols}")
         if not cols:
             raise HTTPException(status_code=400, detail="Schema has no defined columns")
 
-        # Determine insertable keys from CSV header intersection with cols
-        first = rows[0]
-        insert_keys_candidate = [k for k in first.keys() if k in cols and re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', k)]
+        # Robust header mapping: normalize CSV headers and map case-insensitively to defined cols
+        # reader.fieldnames may contain original header strings; build mapping original_header -> col_name
+        fieldnames = getattr(reader, 'fieldnames', None) or (list(rows[0].keys()) if rows else [])
+        # normalization: lowercase, replace non-alnum/_ with underscore, strip surrounding underscores
+        def _norm(h: str) -> str:
+            if h is None:
+                return ''
+            s = h.replace('\ufeff', '').strip().lower()
+            s = re.sub(r'[^a-z0-9_]+', '_', s)
+            s = s.strip('_')
+            return s
+
+        header_to_col = {}
+        for h in fieldnames:
+            nh = _norm(h)
+            if nh in cols:
+                header_to_col[h] = nh
+
+        insert_keys_candidate = list(dict.fromkeys(header_to_col.values()))
         if not insert_keys_candidate:
-            raise HTTPException(status_code=400, detail="No valid columns in CSV to import")
+            # Provide helpful debug message listing detected headers and available columns
+            detected = [str(h) for h in fieldnames]
+            expected = list(cols.keys())
+            raise HTTPException(status_code=400, detail=f"No valid columns in CSV to import. Detected headers: {detected}. Expected columns: {expected}")
 
         inserted = 0
-        async with db.begin():
-            for row in rows:
-                # Filter to candidate insert keys
-                incoming = {k: row.get(k) for k in insert_keys_candidate}
-                params, keys = _validate_and_coerce_row(incoming, cols, enforce_required=True)
+        # Use a fresh transaction/connection for bulk inserts to avoid "transaction already begun" on session
+        async with engine.begin() as conn:
+            for idx, row in enumerate(rows):
+                # Build incoming map using mapped column names -> CSV cell values
+                incoming = {col: row.get(h) for h, col in header_to_col.items()}
+                logger.info(f"Import CSV row[{idx}] incoming raw: {incoming}")
+                try:
+                    logger.info(f"Import CSV row[{idx}] meta subset: {[ (k, cols.get(k)) for k in incoming.keys() ]}")
+                except Exception:
+                    logger.debug('Could not log meta subset for import row')
+                try:
+                    params, keys = _validate_and_coerce_row(incoming, cols, enforce_required=True)
+                except HTTPException as he:
+                    # Validation failed for this row - include context
+                    logger.error(f"Validation failed on CSV row {idx}: {he.detail} -- incoming: {incoming}")
+                    raise
+                except Exception as ex:
+                    logger.error(f"Unexpected error validating CSV row {idx}: {ex} -- incoming: {incoming}")
+                    raise
                 columns_sql = ", ".join(keys)
                 placeholders = ", ".join([f":{k}" for k in keys])
                 insert_sql = text(f"INSERT INTO {phys_table(meta.physical_table_name)} ({columns_sql}) VALUES ({placeholders})")
-                await db.execute(insert_sql, params)
+                # Debug: log param types before execution to help diagnose asyncpg binding errors
+                try:
+                    logger.info(f"Import executing row {idx} param types: {[ (k, type(v).__name__) for k,v in params.items() ]}")
+                except Exception:
+                    logger.debug('Could not enumerate param types for import row')
+                await conn.execute(insert_sql, params)
                 inserted += 1
 
         return {"status": "success", "inserted": inserted}
@@ -512,12 +738,17 @@ async def update_record(schema_id: int, record_id: int, req: CreateRecordRequest
     if not meta: raise HTTPException(404, detail="Schema not found")
     
     # Permission Check (Admin OR Group Match)
-    if not any(str(g).upper() == "ADMIN" for g in user.get('groups', [])) and meta.access_group not in user.get('groups', []):
+    u_groups = user.get('groups', [])
+    u_groups_l = set([str(g).strip().lower() for g in u_groups if g])
+    if not any(str(g).upper() == "ADMIN" for g in u_groups) and not (isinstance(meta.access_group, str) and meta.access_group.strip().lower() in u_groups_l):
         raise HTTPException(status_code=403, detail="Unauthorized")
 
     # 2. Construct Dynamic Update
-    # EXCLUDE immutable fields like 'id' and 'created_at' from the SET clause
-    immutable_fields = {'id', 'created_at'}
+    # EXCLUDE immutable fields like 'id' by default. Allow Admins to update `created_at`.
+    is_admin = any(str(g).upper() == "ADMIN" for g in user.get('groups', []))
+    immutable_fields = {'id'}
+    if not is_admin:
+        immutable_fields.add('created_at')
     incoming = {k: v for k, v in req.data.items() if k not in immutable_fields and re.match(r'^[a-z0-9_]+$', k)}
 
     if not incoming:
@@ -528,23 +759,72 @@ async def update_record(schema_id: int, record_id: int, req: CreateRecordRequest
         colres = await db.execute(text(f"SELECT column_name, data_type, required, validation FROM {meta_table('table_columns')} WHERE schema_id = :id"), {"id": schema_id})
         cols = {r.column_name: {"data_type": r.data_type, "required": r.required, "validation": r.validation} for r in colres.fetchall()}
 
-        params_coerced, valid_keys = _validate_and_coerce_row(incoming, cols, enforce_required=False)
+        logger.info(f"Update incoming data: {incoming}")
+        logger.info(f"Update columns metadata: {list(cols.items())}")
+        try:
+            params_coerced, valid_keys = _validate_and_coerce_row(incoming, cols, enforce_required=False)
+        except HTTPException as he:
+            logger.error(f"Validation error during update: {he.detail}")
+            raise
+        except Exception as ex:
+            logger.error(f"Unexpected validation exception during update: {ex}")
+            raise
         if not valid_keys:
             raise HTTPException(status_code=400, detail="No valid columns to update")
 
         set_clause = ", ".join([f"{k}=:{k}" for k in valid_keys])
-        query = text(f"UPDATE {phys_table(meta.physical_table_name)} SET {set_clause} WHERE id=:rid")
+        # Use RETURNING to get the updated row back and avoid racey reads
+        query = text(f"UPDATE {phys_table(meta.physical_table_name)} SET {set_clause} WHERE id=:rid RETURNING *")
         params = {**params_coerced, "rid": record_id}
 
         logger.info(f"Executing UPDATE on {meta.physical_table_name} for ID {record_id} with keys {valid_keys}")
+        try:
+            logger.info(f"Update executing param types: {[ (k, type(v).__name__) for k,v in params.items() ]}")
+        except Exception:
+            logger.debug('Could not enumerate update param types')
 
         result = await db.execute(query, params)
+        updated = result.fetchone()
         await db.commit()
 
-        if result.rowcount == 0:
+        logger.info(f"UPDATE returned row: {updated}")
+
+        if not updated:
             raise HTTPException(status_code=404, detail="Record not found")
 
-        return {"status": "success"}
+        # Convert to mapping and make JSON-serializable for response
+        try:
+            mapping = dict(getattr(updated, '_mapping', updated)) if updated is not None else None
+            logger.info(f"Post-update row mapping for id={record_id}: {mapping}")
+        except Exception:
+            logger.debug('Could not convert updated row to mapping')
+            mapping = None
+
+        serializable = {}
+        if mapping is not None:
+            for k, v in mapping.items():
+                try:
+                    if isinstance(v, decimal.Decimal):
+                        # convert Decimal to float to keep numeric semantics
+                        serializable[k] = float(v)
+                    elif isinstance(v, (datetime.datetime, datetime.date)):
+                        serializable[k] = v.isoformat()
+                    elif isinstance(v, bytes):
+                        try:
+                            serializable[k] = v.decode('utf-8')
+                        except Exception:
+                            serializable[k] = str(v)
+                    else:
+                        # ensure JSON encodable
+                        try:
+                            json.dumps(v)
+                            serializable[k] = v
+                        except Exception:
+                            serializable[k] = str(v)
+                except Exception:
+                    serializable[k] = str(v)
+
+        return {"status": "success", "updated": serializable}
     except HTTPException:
         raise
     except Exception as e:
@@ -559,7 +839,9 @@ async def import_data(schema_id: int, payload: Dict[str, Any], db: AsyncSession 
     res = await db.execute(text(f"SELECT physical_table_name, access_group FROM {meta_table('schemas')} WHERE id=:id"), {"id": schema_id})
     meta = res.fetchone()
     if not meta: raise HTTPException(404)
-    if not any(str(g).upper() == "ADMIN" for g in user.get('groups', [])) and meta.access_group not in user.get('groups', []):
+    u_groups = user.get('groups', [])
+    u_groups_l = set([str(g).strip().lower() for g in u_groups if g])
+    if not any(str(g).upper() == "ADMIN" for g in u_groups) and not (isinstance(meta.access_group, str) and meta.access_group.strip().lower() in u_groups_l):
         raise HTTPException(status_code=403)
 
     rows = payload.get('rows', [])
@@ -596,10 +878,11 @@ async def import_data(schema_id: int, payload: Dict[str, Any], db: AsyncSession 
 async def get_metadata_tables(group: str, limit: int = 50, offset: int = 0, db: AsyncSession = Depends(get_db), user=Depends(get_current_user)):
     try:
         u_groups = user.get('groups', [])
+        u_groups_l = set([str(g).strip().lower() for g in u_groups if g])
         is_admin = any(str(g).upper() == "ADMIN" for g in u_groups)
 
-        # 1. SECURITY: Admin bypass or exact group match. Admins may query any group dynamically.
-        if not is_admin and group not in u_groups:
+        # 1. SECURITY: Admin bypass or exact group match (case-insensitive). Admins may query any group dynamically.
+        if not is_admin and group.strip().lower() not in u_groups_l:
             logger.warning(f"Unauthorized metadata access attempt by {user['email']} for group {group}")
             raise HTTPException(status_code=403, detail="Unauthorized for this group")
 
@@ -611,8 +894,9 @@ async def get_metadata_tables(group: str, limit: int = 50, offset: int = 0, db: 
             where_clause = "access_group ILIKE :g"
             params = {"g": f"{group}%"}
         else:
-            where_clause = "access_group = :g"
-            params = {"g": group}
+            # force case-insensitive match by lowering access_group in SQL
+            where_clause = "LOWER(access_group) = :g"
+            params = {"g": group.strip().lower()}
 
         # Count total
         count_q = text(f"SELECT COUNT(1) FROM {meta_table('schemas')} WHERE {where_clause}")
@@ -652,9 +936,9 @@ async def search_schemas(q: str | None = None, limit: int = 50, offset: int = 0,
             params['q'] = f"%{q}%"
 
         if not is_admin:
-            # restrict to user's groups
-            base_where.append("access_group = ANY(:g)")
-            params['g'] = u_groups
+            # restrict to user's groups (case-insensitive)
+            base_where.append("LOWER(access_group) = ANY(:g)")
+            params['g'] = [str(g).strip().lower() for g in u_groups]
 
         where_clause = (' AND '.join(base_where)) if base_where else 'TRUE'
 
@@ -677,6 +961,7 @@ async def search_schemas(q: str | None = None, limit: int = 50, offset: int = 0,
 async def get_metadata_groups(limit: int = 50, offset: int = 0, db: AsyncSession = Depends(get_db), user=Depends(get_current_user)):
     try:
         u_groups = user.get('groups', [])
+        u_groups_l = set([str(g).strip().lower() for g in u_groups if g])
         is_admin = any(str(g).upper() == "ADMIN" for g in u_groups)
 
         # If not admin, restrict groups to those the user belongs to
@@ -692,12 +977,12 @@ async def get_metadata_groups(limit: int = 50, offset: int = 0, db: AsyncSession
             if not u_groups:
                 return {"items": [], "total": 0}
             # Regular users only see their groups (intersection). Use Postgres ANY operator.
-            q_count = text(f"SELECT COUNT(DISTINCT access_group) FROM {meta_table('schemas')} WHERE access_group = ANY(:g)")
-            res = await db.execute(q_count, {"g": u_groups})
+            q_count = text(f"SELECT COUNT(DISTINCT access_group) FROM {meta_table('schemas')} WHERE LOWER(access_group) = ANY(:g)")
+            res = await db.execute(q_count, {"g": [g.lower() for g in u_groups]})
             total = int(res.scalar() or 0)
 
-            q = text(f"SELECT access_group, COUNT(1) as cnt FROM {meta_table('schemas')} WHERE access_group = ANY(:g) GROUP BY access_group ORDER BY access_group LIMIT :limit OFFSET :offset")
-            rows = (await db.execute(q, {"g": u_groups, "limit": int(limit), "offset": int(offset)})).fetchall()
+            q = text(f"SELECT access_group, COUNT(1) as cnt FROM {meta_table('schemas')} WHERE LOWER(access_group) = ANY(:g) GROUP BY access_group ORDER BY access_group LIMIT :limit OFFSET :offset")
+            rows = (await db.execute(q, {"g": [g.lower() for g in u_groups], "limit": int(limit), "offset": int(offset)})).fetchall()
 
         items = [{"group": r.access_group, "count": int(r.cnt)} for r in rows]
         return {"items": items, "total": total}
@@ -727,7 +1012,8 @@ async def get_schema_versions(schema_id: int, db: AsyncSession = Depends(get_db)
         if not sch:
             raise HTTPException(status_code=404, detail='Schema not found')
         u_groups = user.get('groups', [])
-        if not any(str(g).upper() == 'ADMIN' for g in u_groups) and sch.access_group not in u_groups:
+        u_groups_l = set([str(g).strip().lower() for g in u_groups if g])
+        if not any(str(g).upper() == 'ADMIN' for g in u_groups) and not (isinstance(sch.access_group, str) and sch.access_group.strip().lower() in u_groups_l):
             raise HTTPException(status_code=403, detail='Unauthorized')
 
         q = text(f"SELECT id, version, status, physical_table_name, created_by, created_at FROM {meta_table('schema_versions')} WHERE schema_id = :sid ORDER BY version DESC")
@@ -772,6 +1058,55 @@ async def debug_table(table_name: str, db: AsyncSession = Depends(get_db), user=
         raise
     except Exception as e:
         logger.error(f"debug_table error: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/admin/debug/coerce-row")
+async def debug_coerce_row(schema_id: int, payload: Dict[str, Any], db: AsyncSession = Depends(get_db), user=Depends(get_current_user)):
+    """Admin-only: take a sample row payload and return the coerced params and their Python types without inserting.
+    Request JSON: { "schema_id": int, "row": { col: value }, "enforce_required": true|false }
+    """
+    # Admin check
+    u_groups = user.get('groups', [])
+    is_admin = any(str(g).upper() == 'ADMIN' for g in u_groups)
+    if not is_admin:
+        raise HTTPException(status_code=403, detail='Admin required')
+
+    try:
+        row = payload.get('row') if payload else None
+        enforce = bool(payload.get('enforce_required', True)) if payload else True
+        if not isinstance(row, dict):
+            raise HTTPException(status_code=400, detail='row must be an object')
+
+        # load columns metadata
+        colres = await db.execute(text(f"SELECT column_name, data_type, required, validation FROM {meta_table('table_columns')} WHERE schema_id = :id"), {"id": schema_id})
+        cols = {r.column_name: {"data_type": r.data_type, "required": r.required, "validation": r.validation} for r in colres.fetchall()}
+        if not cols:
+            raise HTTPException(status_code=400, detail='No column metadata for schema')
+
+        # Filter incoming to known columns
+        incoming = {k: v for k, v in row.items() if k in cols}
+
+        params, keys = _validate_and_coerce_row(incoming, cols, enforce_required=enforce)
+
+        types = {k: type(v).__name__ for k, v in params.items()}
+        # Return both coerced params (serialized where necessary) and types
+        serializable = {}
+        for k, v in params.items():
+            if isinstance(v, (datetime.datetime, datetime.date)):
+                serializable[k] = v.isoformat()
+            else:
+                try:
+                    json.dumps(v)
+                    serializable[k] = v
+                except Exception:
+                    serializable[k] = str(v)
+
+        return {"params": serializable, "types": types, "keys": keys}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"debug_coerce_row error: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
