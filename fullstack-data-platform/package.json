@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "generate-logos": "node tools/convert_svg_sharp.cjs public/logo-bank.svg public/logo-bank.png 880 192 && node tools/convert_svg_sharp.cjs public/logo-bank-dark.svg public/logo-bank-dark.png 880 192",
     "ci-build": "npm ci; npm run build",
     "lint": "eslint .",
     "preview": "vite preview"
