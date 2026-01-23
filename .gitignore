@@ -1,0 +1,15 @@
+# Ignore environment files with real secrets
+backend/backend/.env
+backend/.env
+fullstack-data-platform/.env
+
+# Python venvs
+**/venv/
+
+# Node
+node_modules/
+/dist
+
+# IDE
+.vscode/
+.idea/

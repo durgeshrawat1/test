@@ -1,0 +1,67 @@
+import React, { createContext, useContext, useState, useEffect } from 'react';
+import type { UserProfile } from '../types';
+import { CONFIG } from '../config';
+
+interface AuthContextType {
+  user: UserProfile | null;
+  isLoading: boolean;
+  login: () => void; 
+  logout: () => void;
+}
+
+const AuthContext = createContext<AuthContextType | null>(null);
+
+export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const [user, setUser] = useState<UserProfile | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+
+  useEffect(() => {
+    const checkSession = async () => {
+      try {
+        // STRICT: Hit Backend. Backend checks ALB Header.
+        const response = await fetch(`${CONFIG.API_BASE_URL}/auth/me`);
+        
+        if (response.ok) {
+            const data = await response.json();
+            setUser(data.user);
+        } else {
+            // 401 Unauthorized -> User is not logged in via ALB
+            console.warn("Session Check: Not Authenticated (401)");
+            setUser(null);
+        }
+      } catch (error) {
+        console.error("Session Check Failed:", error);
+        setUser(null);
+      } finally {
+        setIsLoading(false);
+      }
+    };
+
+    checkSession();
+  }, []);
+
+  const login = () => {
+    // In ALB flow, 'Login' just means redirecting to a protected route.
+    // The ALB interceptor sees no session and redirects to Cognito.
+    window.location.href = "/";
+  };
+
+  const logout = () => {
+    setUser(null);
+    // Standard ALB Logout Pattern
+    // Typically: https://<auth-domain>/logout?client_id=...&logout_uri=...
+    window.location.href = "/login"; 
+  };
+
+  return (
+    <AuthContext.Provider value={{ user, isLoading, login, logout }}>
+      {children}
+    </AuthContext.Provider>
+  );
+};
+
+export const useAuth = () => {
+  const context = useContext(AuthContext);
+  if (!context) throw new Error("useAuth must be used within AuthProvider");
+  return context;
+};

@@ -1,0 +1,7 @@
+This file was used as a development/in-progress working copy and contains
+local-development fallbacks (DEV_MODE, local fake users, sqlite fallbacks).
+
+It has been replaced in the main application with production-safe logic.
+Keep this file only for historical reference; remove before creating a
+production artifact. For deployments, run the application via the main
+module at `backend/backend/app/main.py` and ensure `DATABASE_URL` is set.
