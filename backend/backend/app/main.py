@@ -280,13 +280,30 @@ async def get_current_user(request: Request):
     except Exception:
         groups = []
 
-    logger.info(f"User {email} groups resolved: {groups} (scanned headers: {scanned})")
+    # Normalize groups to a deduplicated, trimmed list and compute admin flag
+    normalized = []
+    seen = set()
+    for g in groups:
+        try:
+            ng = str(g).strip()
+            lk = ng.lower()
+        except Exception:
+            continue
+        if lk in seen:
+            continue
+        seen.add(lk)
+        normalized.append(ng)
+
+    is_admin = any(str(g).upper() == 'ADMIN' for g in normalized)
+
+    logger.info(f"User {email} groups resolved: {normalized} (scanned headers: {scanned}) admin={is_admin}")
 
     return {
         "id": claims.get('sub') or claims.get('oid'),
         "email": email,
         "name": email.split('@')[0].capitalize(),
-        "groups": groups
+        "groups": normalized,
+        "is_admin": is_admin,
     }
 
 
@@ -357,87 +374,76 @@ def _validate_and_coerce_row(row: Dict[str, Any], cols: Dict[str, Dict[str, Any]
     params = {}
     keys = []
 
-    for k, raw in row.items():
-        if k not in cols:
-            # ignore unknown columns
-            continue
-
-        meta_col = cols[k]
-        v = raw
+    def _coerce_value(k: str, v: Any, meta_col: Dict[str, Any]):
         if isinstance(v, str):
             v = v.strip()
             if v == '':
-                v = None
+                return None
 
-        if enforce_required and meta_col.get('required') and (v is None):
+        raw_dt = meta_col.get('data_type')
+        dt = (raw_dt or '').lower()
+        if not dt or any(tok in dt for tok in ('text', 'string', 'char', 'varchar')):
+            if k.endswith('_at') or 'date' in k:
+                dt = 'timestamp'
+
+        try:
+            if dt == 'int' or dt.startswith('int'):
+                return int(v)
+            if dt == 'float' or dt.startswith('float') or dt.startswith('numeric') or dt.startswith('decimal'):
+                return float(v)
+            if dt in ('text', 'string') or dt.startswith('varchar') or dt.startswith('char'):
+                return str(v)
+            if 'timestamp' in dt or 'datetime' in dt or 'timestamptz' in dt:
+                return _parse_datetime_string(v)
+            if 'date' == dt or (('date' in dt) and ('timestamp' not in dt)):
+                if isinstance(v, datetime.date) and not isinstance(v, datetime.datetime):
+                    return v
+                s = str(v)
+                try:
+                    return datetime.date.fromisoformat(s)
+                except Exception:
+                    try:
+                        return datetime.datetime.strptime(s, '%Y-%m-%d').date()
+                    except Exception:
+                        raise ValueError('invalid date format')
+            if dt == 'bool' or dt.startswith('bool'):
+                if isinstance(v, bool):
+                    return v
+                if str(v).lower() in ('true', '1', 'yes'):
+                    return True
+                if str(v).lower() in ('false', '0', 'no'):
+                    return False
+                raise ValueError('invalid boolean')
+        except HTTPException:
+            raise
+        except Exception as ex:
+            logger.error(f"Coercion failed for column '{k}' expected '{meta_col.get('data_type')}' value '{v}': {ex}")
+            raise HTTPException(status_code=400, detail=f"{k} has invalid type for {meta_col.get('data_type')}: {ex}")
+
+        return str(v)
+
+    for k, raw in row.items():
+        if k not in cols:
+            continue
+
+        meta_col = cols[k]
+        if enforce_required and meta_col.get('required') and (raw is None or (isinstance(raw, str) and raw.strip() == '')):
             raise HTTPException(status_code=400, detail=f"{k} is required")
 
-        if v is not None:
-            # Normalize data_type and allow substring matches for Postgres variants
-            raw_dt = meta_col.get('data_type')
-            dt = (raw_dt or '').lower()
-            # Fallback heuristics when data_type is missing or appears textual:
-            # treat *_at and fields containing 'date' as timestamps/dates so they get coerced.
-            if not dt or any(tok in dt for tok in ('text', 'string', 'char', 'varchar')):
-                if k.endswith('_at') or 'date' in k:
-                    dt = 'timestamp'
-            try:
-                if dt == 'int' or dt.startswith('int'):
-                    params[k] = int(v)
-                elif dt == 'float' or dt.startswith('float') or dt.startswith('numeric') or dt.startswith('decimal'):
-                    params[k] = float(v)
-                elif dt in ('text', 'string') or dt.startswith('varchar') or dt.startswith('char'):
-                    params[k] = str(v)
-                elif 'timestamp' in dt or 'datetime' in dt or 'timestamptz' in dt:
-                    # Accept ISO formats and common SQL datetimes like 'YYYY-MM-DD HH:MM:SS'
-                    try:
-                        parsed = _parse_datetime_string(v)
-                        params[k] = parsed
-                    except HTTPException:
-                        raise
-                    except Exception as e:
-                        raise ValueError(f'invalid datetime format: {e}')
-                elif 'date' == dt or (('date' in dt) and ('timestamp' not in dt)):
-                    if isinstance(v, datetime.date) and not isinstance(v, datetime.datetime):
-                        params[k] = v
-                    else:
-                        s = str(v)
-                        parsed = None
-                        try:
-                            parsed = datetime.date.fromisoformat(s)
-                        except Exception:
-                            try:
-                                parsed = datetime.datetime.strptime(s, '%Y-%m-%d').date()
-                            except Exception:
-                                parsed = None
-                        if parsed is None:
-                            raise ValueError('invalid date format')
-                        params[k] = parsed
-                elif dt == 'bool' or dt.startswith('bool'):
-                    if isinstance(v, bool):
-                        params[k] = v
-                    elif str(v).lower() in ('true', '1', 'yes'):
-                        params[k] = True
-                    elif str(v).lower() in ('false', '0', 'no'):
-                        params[k] = False
-                    else:
-                        raise ValueError('invalid boolean')
-                else:
-                    params[k] = str(v)
-            except HTTPException:
-                raise
-            except Exception as ex:
-                logger.error(f"Coercion failed for column '{k}' expected '{meta_col.get('data_type')}' value '{v}': {ex}")
-                raise HTTPException(status_code=400, detail=f"{k} has invalid type for {meta_col.get('data_type')}: {ex}")
-
-            # additional validations
-            if meta_col.get('validation') == 'full_name' and re.search(r'\d', str(v)):
-                raise HTTPException(status_code=400, detail=f"{k} appears invalid (no digits allowed)")
-            if meta_col.get('validation') == 'email' and not re.match(r'^\S+@\S+\.\S+$', str(v)):
-                raise HTTPException(status_code=400, detail=f"{k} must be a valid email")
-        else:
+        if raw is None or (isinstance(raw, str) and raw.strip() == ''):
             params[k] = None
+            keys.append(k)
+            continue
 
+        coerced = _coerce_value(k, raw, meta_col)
+
+        # additional validations
+        if meta_col.get('validation') == 'full_name' and re.search(r'\d', str(coerced)):
+            raise HTTPException(status_code=400, detail=f"{k} appears invalid (no digits allowed)")
+        if meta_col.get('validation') == 'email' and not re.match(r'^\S+@\S+\.\S+$', str(coerced)):
+            raise HTTPException(status_code=400, detail=f"{k} must be a valid email")
+
+        params[k] = coerced
         keys.append(k)
 
     if not keys:
