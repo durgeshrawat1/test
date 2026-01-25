@@ -699,6 +699,7 @@ async def import_csv(schema_id: int, file: UploadFile = File(...), db: AsyncSess
             raise HTTPException(status_code=400, detail=f"No valid columns in CSV to import. Detected headers: {detected}. Expected columns: {expected}")
 
         inserted = 0
+        updated = 0
         # Use a fresh transaction/connection for bulk inserts to avoid "transaction already begun" on session
         async with engine.begin() as conn:
             for idx, row in enumerate(rows):
@@ -718,18 +719,48 @@ async def import_csv(schema_id: int, file: UploadFile = File(...), db: AsyncSess
                 except Exception as ex:
                     logger.error(f"Unexpected error validating CSV row {idx}: {ex} -- incoming: {incoming}")
                     raise
-                columns_sql = ", ".join(keys)
-                placeholders = ", ".join([f":{k}" for k in keys])
-                insert_sql = text(f"INSERT INTO {phys_table(meta.physical_table_name)} ({columns_sql}) VALUES ({placeholders})")
-                # Debug: log param types before execution to help diagnose asyncpg binding errors
-                try:
-                    logger.info(f"Import executing row {idx} param types: {[ (k, type(v).__name__) for k,v in params.items() ]}")
-                except Exception:
-                    logger.debug('Could not enumerate param types for import row')
-                await conn.execute(insert_sql, params)
-                inserted += 1
 
-        return {"status": "success", "inserted": inserted}
+                # If a primary key `id` is present in the schema and supplied in the CSV,
+                # attempt an UPDATE first; otherwise INSERT.
+                phys = phys_table(meta.physical_table_name)
+                if 'id' in cols and params.get('id') is not None:
+                    # Check existence
+                    exists_q = text(f"SELECT 1 FROM {phys} WHERE id = :id LIMIT 1")
+                    r = await conn.execute(exists_q, {"id": params.get('id')})
+                    found = r.fetchone()
+                    if found:
+                        # Prepare update using keys excluding id
+                        upd_keys = [k for k in keys if k != 'id']
+                        if upd_keys:
+                            set_clause = ", ".join([f"{k}=:{k}" for k in upd_keys])
+                            upd_q = text(f"UPDATE {phys} SET {set_clause} WHERE id = :id")
+                            upd_params = {k: params[k] for k in upd_keys}
+                            upd_params['id'] = params['id']
+                            await conn.execute(upd_q, upd_params)
+                        updated += 1
+                    else:
+                        # Insert new row
+                        columns_sql = ", ".join(keys)
+                        placeholders = ", ".join([f":{k}" for k in keys])
+                        insert_sql = text(f"INSERT INTO {phys} ({columns_sql}) VALUES ({placeholders})")
+                        try:
+                            logger.info(f"Import executing row {idx} param types: {[ (k, type(v).__name__) for k,v in params.items() ]}")
+                        except Exception:
+                            logger.debug('Could not enumerate param types for import row')
+                        await conn.execute(insert_sql, params)
+                        inserted += 1
+                else:
+                    columns_sql = ", ".join(keys)
+                    placeholders = ", ".join([f":{k}" for k in keys])
+                    insert_sql = text(f"INSERT INTO {phys} ({columns_sql}) VALUES ({placeholders})")
+                    try:
+                        logger.info(f"Import executing row {idx} param types: {[ (k, type(v).__name__) for k,v in params.items() ]}")
+                    except Exception:
+                        logger.debug('Could not enumerate param types for import row')
+                    await conn.execute(insert_sql, params)
+                    inserted += 1
+
+        return {"status": "completed", "inserted": inserted, "updated": updated, "errors": []}
     except HTTPException:
         raise
     except Exception as e:
@@ -859,6 +890,7 @@ async def import_data(schema_id: int, payload: Dict[str, Any], db: AsyncSession 
     cols = {r.column_name: {"data_type": r.data_type, "required": r.required, "validation": r.validation} for r in colres.fetchall()}
 
     inserted = 0
+    updated = 0
     errors = []
     try:
         async with db.begin():
@@ -867,13 +899,29 @@ async def import_data(schema_id: int, payload: Dict[str, Any], db: AsyncSession 
                     # Filter to known columns
                     incoming = {k: v for k, v in row.items() if k in cols}
                     params, keys = _validate_and_coerce_row(incoming, cols, enforce_required=True)
+                    phys = phys_table(meta.physical_table_name)
+                    # If primary key present, try update first
+                    if 'id' in cols and params.get('id') is not None:
+                        exists_q = text(f"SELECT 1 FROM {phys} WHERE id = :id LIMIT 1")
+                        r = await db.execute(exists_q, {"id": params.get('id')})
+                        found = r.fetchone()
+                        if found:
+                            upd_keys = [k for k in keys if k != 'id']
+                            if upd_keys:
+                                set_clause = ", ".join([f"{k}=:{k}" for k in upd_keys])
+                                upd_q = text(f"UPDATE {phys} SET {set_clause} WHERE id = :id")
+                                upd_params = {k: params[k] for k in upd_keys}
+                                upd_params['id'] = params['id']
+                                await db.execute(upd_q, upd_params)
+                            updated += 1
+                            continue
                     columns_sql = ", ".join(keys)
                     placeholders = ", ".join([f":{k}" for k in keys])
                     await db.execute(text(f"INSERT INTO {phys_table(meta.physical_table_name)} ({columns_sql}) VALUES ({placeholders})"), params)
                     inserted += 1
                 except Exception as e:
                     errors.append({"row": idx, "error": str(e)})
-        return {"status": "completed", "inserted": inserted, "errors": errors}
+        return {"status": "completed", "inserted": inserted, "updated": updated, "errors": errors}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

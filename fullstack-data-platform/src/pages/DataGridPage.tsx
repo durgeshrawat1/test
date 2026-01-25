@@ -155,6 +155,18 @@ export const DataGridPage: React.FC = () => {
     ? columnsMeta.map((c: any) => c.column_name)
     : (data && data.length > 0 ? Object.keys(data[0]) : []);
 
+  // Ensure primary key `id` (if present) is the first column shown
+  const orderedColumnNames = React.useMemo(() => {
+    if (!columnNames || columnNames.length === 0) return columnNames;
+    const names = [...columnNames];
+    const idx = names.findIndex(n => n === 'id');
+    if (idx > 0) {
+      names.splice(idx, 1);
+      names.unshift('id');
+    }
+    return names;
+  }, [columnNames]);
+
   // --- 4. DATA MODIFICATION ---
   const handleManualAdd = async () => {
     try {
@@ -361,7 +373,9 @@ export const DataGridPage: React.FC = () => {
                     });
                     if (res.ok) {
                       const out = await res.json();
-                      alert(`Import completed. Inserted: ${out.inserted}`);
+                      const inserted = out.inserted ?? 0;
+                      const updated = out.updated ?? 0;
+                      alert(`Import completed. Inserted: ${inserted}, Updated: ${updated}`);
                       fetchData();
                     } else {
                       const txt = await res.text();
